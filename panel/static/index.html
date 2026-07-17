@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Grok Auto Panel</title>
-  <link rel="stylesheet" href="/static/styles.css?v=logs-get-fix-1" />
+  <link rel="stylesheet" href="/static/styles.css?v=logs-register-only-1" />
 </head>
 <body>
   <div class="bg-orb orb-a"></div>
@@ -209,7 +209,7 @@
       <section id="tab-logs" class="tab-panel">
         <div class="card glass">
           <h2>日志</h2>
-          <p class="section-sub">查看应用日志与 GoProxy 日志尾部。默认只读最近内容，不自动改配置。</p>
+          <p class="section-sub">只显示注册机日志（logs/register-*.log）。默认只读最近内容。</p>
           <div class="row log-toolbar">
             <label>日志文件
               <select id="logFileSelect"></select>
@@ -224,7 +224,7 @@
           <div class="hint-row">
             <span class="pill" id="logMeta">未加载</span>
           </div>
-          <pre id="logView" class="mono log-view">选择日志文件后点击刷新。</pre>
+          <pre id="logView" class="log-view">选择注册机日志后点击刷新。</pre>
         </div>
       </section>
 
@@ -253,6 +253,6 @@
   </div>
 
   <div id="toastStack" class="toast-stack" aria-live="polite" aria-relevant="additions"></div>
-  <script src="/static/app.js?v=task-progress-2"></script>
+  <script src="/static/app.js?v=logs-register-only-1"></script>
 </body>
 </html>

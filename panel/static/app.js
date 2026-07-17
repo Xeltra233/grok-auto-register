@@ -636,9 +636,9 @@ async function loadLogList() {
   if (!state.logFiles.length) {
     const opt = document.createElement("option");
     opt.value = "";
-    opt.textContent = "暂无日志文件（启动手动注册后会生成 logs/register-*.log）";
+    opt.textContent = "暂无注册机日志（启动手动注册后生成）";
     sel.appendChild(opt);
-    if ($("logView")) $("logView").textContent = "暂无日志文件。\n\n说明：\n1) 手动注册日志会写入 logs/register-*.log 与 register-latest.log\n2) GoProxy 日志在 data/goproxy/goproxy.manager.log\n3) 若刚部署，先点一次手动注册或启动本地代理，再点“刷新列表”";
+    if ($("logView")) $("logView").textContent = "暂无注册机日志。\n\n说明：\n1) 这里只显示注册机日志\n2) 手动注册开始后会生成 logs/register-latest.log\n3) 生成后点“刷新列表”";
     if ($("logMeta")) $("logMeta").textContent = "无文件";
     return res;
   }
@@ -646,7 +646,7 @@ async function loadLogList() {
     const opt = document.createElement("option");
     opt.value = f.id;
     const when = f.mtime ? fmtTime(f.mtime) : "-";
-    opt.textContent = `[${f.source_label || f.source}] ${f.name} (${fmtSize(f.size || 0)}) ${when}`;
+    opt.textContent = `${f.name} (${fmtSize(f.size || 0)}) ${when}`;
     sel.appendChild(opt);
   });
   let preferred = "";
@@ -654,8 +654,7 @@ async function loadLogList() {
   if (!preferred) {
     const regLatest = state.logFiles.find((f) => String(f.name || "").endsWith("register-latest.log"));
     const regAny = state.logFiles.find((f) => String(f.name || "").includes("register_"));
-    const gp = state.logFiles.find((f) => String(f.name || "").includes("goproxy.manager.log"));
-    preferred = (regLatest || regAny || gp || state.logFiles[0]).id;
+    preferred = (regLatest || regAny || state.logFiles[0]).id;
   }
   sel.value = preferred;
   state.selectedLogId = sel.value;

@@ -401,10 +401,9 @@ def _log_roots(cfg: Optional[dict] = None, root: Optional[Path] = None) -> list[
     cfg = cfg or {}
     base = Path(root) if root else _project_root()
     log_dir = str(cfg.get("log_dir") or "logs")
-    goproxy_data = str(cfg.get("goproxy_data_dir") or "data/goproxy")
+    # Panel Logs tab only shows registration-machine logs (not GoProxy).
     items = [
-        {"id": "app", "label": "应用日志", "dir": (base / log_dir).resolve(), "prefix": "app"},
-        {"id": "goproxy", "label": "GoProxy", "dir": (base / goproxy_data).resolve(), "prefix": "goproxy"},
+        {"id": "register", "label": "注册机", "dir": (base / log_dir).resolve(), "prefix": "register"},
     ]
     return items
 
@@ -422,7 +421,15 @@ def _list_log_files(cfg: Optional[dict] = None, root: Optional[Path] = None) -> 
                 if not p.is_file():
                     continue
                 name = p.name
-                if not (name.endswith((".log", ".err", ".txt")) or name in ("goproxy.manager.log", "goproxy.build.log")):
+                # only registration machine logs
+                lname = name.lower()
+                if not (
+                    lname == "register-latest.log"
+                    or lname.startswith("register_")
+                    or lname.startswith("register-")
+                ):
+                    continue
+                if not lname.endswith((".log", ".err", ".txt")):
                     continue
                 try:
                     rel = str(p.relative_to(d)).replace("\\", "/")
