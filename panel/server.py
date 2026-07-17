@@ -760,6 +760,20 @@ class PanelHandler(BaseHTTPRequestHandler):
             g["webui_proxy"] = True
         pool = pool_counts(cfg, root=str(STATE.root))
         pool_auto = pool_autoreg_status()
+        task = dict((pool_auto or {}).get("progress") or {})
+        if pool_auto:
+            task.setdefault("registration_running", bool(pool_auto.get("registration_running")))
+            if pool_auto.get("registration_running"):
+                task["running"] = True
+            if task.get("target") in (None, 0):
+                try:
+                    task["target"] = int(cfg.get("register_count") or 0)
+                except Exception:
+                    task["target"] = 0
+            if task.get("success") is None:
+                task["success"] = 0
+            if task.get("fail") is None:
+                task["fail"] = 0
         try:
             pool_need = compute_register_need(
                 current_total=int(pool.get("total") or 0) if pool.get("ok") else 0,
@@ -794,7 +808,7 @@ class PanelHandler(BaseHTTPRequestHandler):
             "pool": pool,
             "pool_need": pool_need,
             "pool_autoreg": pool_auto,
-            "task": (pool_auto or {}).get("progress") or {},
+            "task": task,
             "remote_live": remote_live_status(),
             "local_cred_retain": local_cred_retain_status(),
             "config": {

@@ -81,6 +81,20 @@ def resolve_config_file(root=None, prefer_existing=True):
 CONFIG_FILE = resolve_config_file()
 MEMORY_CLEANUP_INTERVAL = 5
 
+_TASK_PROGRESS = {
+    "running": False,
+    "mode": "",
+    "target": 0,
+    "success": 0,
+    "fail": 0,
+    "done": 0,
+    "concurrent": 0,
+    "started_at": None,
+    "finished_at": None,
+    "last_error": "",
+    "message": "",
+}
+_task_progress_lock = threading.Lock()
 
 def get_task_progress():
     with _task_progress_lock:
@@ -264,20 +278,6 @@ _freemail_domains_cache_lock = threading.Lock()
 _FREEMAIL_DOMAINS_CACHE_TTL_SEC = 60.0
 _io_lock = threading.Lock()
 _stats_lock = threading.Lock()
-_TASK_PROGRESS = {
-    "running": False,
-    "mode": "",
-    "target": 0,
-    "success": 0,
-    "fail": 0,
-    "done": 0,
-    "concurrent": 0,
-    "started_at": None,
-    "finished_at": None,
-    "last_error": "",
-    "message": "",
-}
-_task_progress_lock = threading.Lock()
 _register_log_lock = threading.Lock()
 _register_log_fp = None
 _register_log_path = None
@@ -5641,6 +5641,13 @@ def run_registration_cli(count, pool_watch=None):
     # Never spawn more browser workers than registration targets.
     worker_count = min(worker_count, max(1, int(count or 1)))
     stats = {"success": 0, "fail": 0, "lock": threading.Lock()}
+    begin_task_progress(
+        "manual",
+        target=int(count or 0),
+        concurrent=int(worker_count or 1),
+        message="manual registration started",
+    )
+    cli_log(f"[*] 任务进度已初始化: 目标 {int(count or 0)} | 并发 {int(worker_count or 1)}")
     stop_speed = threading.Event()
     stop_pool_watch = threading.Event()
     pool_watch = dict(pool_watch or {}) if pool_watch else None

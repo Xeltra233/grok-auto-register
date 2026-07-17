@@ -455,17 +455,27 @@ function applyOverview(data, opts = {}) {
   if ($("mTarget")) $("mTarget").textContent = target ?? "-";
   if ($("mRemain")) $("mRemain").textContent = remain ?? "-";
   const task = data.task || data.pool_autoreg?.progress || {};
-  const tSuccess = task.success != null ? task.success : "-";
-  const tFail = task.fail != null ? task.fail : "-";
-  const tTarget = task.target != null ? task.target : (data.config?.register_count ?? "-");
-  const tDone = task.done != null ? task.done : ((Number(tSuccess)||0)+(Number(tFail)||0));
+  const running = !!(task.running || data.pool_autoreg?.registration_running);
+  const tTargetNum = Number(
+    task.target != null ? task.target : (data.config?.register_count ?? 0)
+  );
+  const tSuccessNum = Number(task.success != null ? task.success : 0);
+  const tFailNum = Number(task.fail != null ? task.fail : 0);
+  const hasTask = running || tTargetNum > 0 || tSuccessNum > 0 || tFailNum > 0 || !!task.mode;
+  const tSuccess = hasTask ? tSuccessNum : "-";
+  const tFail = hasTask ? tFailNum : "-";
+  const tTarget = hasTask ? (tTargetNum || data.config?.register_count || "-") : (data.config?.register_count ?? "-");
+  const tDone = hasTask ? (task.done != null ? task.done : (tSuccessNum + tFailNum)) : "-";
   if ($("mSuccess")) $("mSuccess").textContent = tSuccess;
   if ($("mFail")) $("mFail").textContent = tFail;
   if ($("pillTask")) {
-    const running = !!task.running || !!data.pool_autoreg?.registration_running;
-    $("pillTask").textContent = running
-      ? `手动任务进行中: 成功 ${tSuccess} / 失败 ${tFail} / 目标 ${tTarget} / 已完成 ${tDone}`
-      : `手动任务: 成功 ${tSuccess} / 失败 ${tFail} / 目标 ${tTarget}`;
+    if (running) {
+      $("pillTask").textContent = `手动任务进行中: 成功 ${tSuccessNum} / 失败 ${tFailNum} / 目标 ${tTarget} / 已完成 ${tDone}`;
+    } else if (hasTask) {
+      $("pillTask").textContent = `手动任务: 成功 ${tSuccessNum} / 失败 ${tFailNum} / 目标 ${tTarget}`;
+    } else {
+      $("pillTask").textContent = `手动任务: 未开始 / 目标 ${data.config?.register_count ?? "-"}`;
+    }
   }
   $("pillLive").textContent = `测活门槛: ${data.config?.live_inspect_enabled === false ? "关闭" : "开启"}`;
   $("pillBind").textContent = `全局代理: ${(data.config?.proxy_mode || (data.config?.goproxy_bind_register_proxy ? "goproxy" : "custom")) === "goproxy" ? "本机 GoProxy" : "自有代理"}`;
