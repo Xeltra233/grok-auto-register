@@ -143,9 +143,6 @@ DEFAULT_CONFIG = {
     "goproxy_bind_register_proxy": False,
     "goproxy_bind_cpa_proxy": False,
     "goproxy_host": "127.0.0.1",
-    "browser_monitor_enabled": True,
-    "browser_monitor_interval_sec": 15,
-    "browser_zombie_cleanup_enabled": True,
     "log_cleanup_enabled": True,
     "log_dir": "logs",
     "log_retain_days": 7,
@@ -1575,7 +1572,7 @@ def yyds_get_email_and_token(api_key=None, jwt=None):
 def yyds_get_oai_code(
     token,
     address,
-    timeout=180,
+    timeout=300,
     poll_interval=3,
     log_callback=None,
     jwt=None,
@@ -1700,7 +1697,7 @@ def get_email_and_token(api_key=None, log_callback=None):
 def get_oai_code(
     dev_token,
     email,
-    timeout=180,
+    timeout=300,
     poll_interval=3,
     log_callback=None,
     cancel_callback=None,
@@ -1780,7 +1777,7 @@ def extract_verification_code(text, subject=""):
 def duckmail_get_oai_code(
     dev_token,
     email,
-    timeout=180,
+    timeout=300,
     poll_interval=3,
     log_callback=None,
     cancel_callback=None,
@@ -1858,7 +1855,7 @@ def freemail_get_message_detail(api_base, token, message_id):
 def freemail_get_oai_code(
     dev_token,
     email,
-    timeout=180,
+    timeout=300,
     poll_interval=3,
     log_callback=None,
     cancel_callback=None,
@@ -1967,7 +1964,7 @@ def icloud_hme_get_messages(account_id, email, limit=20, days=7):
 def icloud_hme_get_oai_code(
     dev_token,
     email,
-    timeout=180,
+    timeout=300,
     poll_interval=3,
     log_callback=None,
     cancel_callback=None,
@@ -2024,7 +2021,7 @@ def icloud_hme_get_oai_code(
 def cloudflare_get_oai_code(
     dev_token,
     email,
-    timeout=180,
+    timeout=300,
     poll_interval=3,
     log_callback=None,
     cancel_callback=None,
@@ -2319,11 +2316,6 @@ def finalize_all_browsers(log_callback=None, reason="task end cleanup"):
     except Exception as exc:
         if log_callback:
             log_callback(f"[Debug] mint browser finalize failed: {exc}")
-    try:
-        cleanup_orphan_browsers(log_callback=log_callback, reason=reason)
-    except Exception as exc:
-        if log_callback:
-            log_callback(f"[Debug] orphan browser cleanup failed: {exc}")
 
 
 def _wait_cpa_async_threads(timeout=300, log_callback=None, skip_if_stopping=None):
@@ -2518,6 +2510,91 @@ def _browser_process_id(browser):
     return None
 
 
+def _get_browser_root_pid():
+    try:
+        return getattr(_thread_local, "browser_root_pid", None)
+    except Exception:
+        return None
+
+
+def _set_browser_root_pid(pid):
+    try:
+        if pid is None:
+            if hasattr(_thread_local, "browser_root_pid"):
+                delattr(_thread_local, "browser_root_pid")
+        else:
+            _thread_local.browser_root_pid = int(pid)
+    except Exception:
+        pass
+
+
+def _collect_pid_tree(pid):
+    """Snapshot root PID + descendants before quit/reparent can hide children."""
+    pids = []
+    if not pid:
+        return pids
+    try:
+        pid = int(pid)
+    except Exception:
+        return pids
+    pids.append(pid)
+    try:
+        import psutil
+        root = psutil.Process(pid)
+        for child in root.children(recursive=True):
+            try:
+                pids.append(int(child.pid))
+            except Exception:
+                pass
+    except Exception:
+        pass
+    # preserve order, unique
+    seen = set()
+    out = []
+    for p in pids:
+        if p in seen:
+            continue
+        seen.add(p)
+        out.append(p)
+    return out
+
+
+def _force_kill_pids(pids, log_callback=None):
+    """Force-kill an explicit PID snapshot (root + pre-quit descendants)."""
+    if not pids:
+        return False
+    try:
+        import psutil
+    except Exception as exc:
+        if log_callback:
+            log_callback(f"[Debug] psutil unavailable, skip force-kill pids={pids}: {exc}")
+        return False
+
+    procs = []
+    for pid in pids:
+        try:
+            procs.append(psutil.Process(int(pid)))
+        except Exception:
+            continue
+    if not procs:
+        return False
+
+    killed = False
+    for proc in procs:
+        try:
+            proc.kill()
+            killed = True
+        except Exception:
+            pass
+    try:
+        psutil.wait_procs(procs, timeout=2)
+    except Exception:
+        pass
+    if killed and log_callback:
+        log_callback(f"[Debug] force-killed browser pid snapshot count={len(procs)} pids={sorted({int(p.pid) for p in procs})}")
+    return killed
+
+
 def _pid_is_running(pid):
     if not pid:
         return False
@@ -2570,33 +2647,19 @@ def _force_kill_pid_tree(pid, log_callback=None):
     return killed
 
 
-def cleanup_orphan_browsers(log_callback=None, reason="orphan cleanup"):
-    """Kill leftover managed Chromium roots (project profiles / Drission autoPort)."""
-    try:
-        from panel.browser_monitor import cleanup_zombies
-    except Exception as exc:
-        if log_callback:
-            log_callback(f"[Debug] orphan cleanup unavailable: {exc}")
-        return {"ok": False, "error": str(exc)}
-
-    root = os.path.dirname(os.path.abspath(__file__))
-    res = cleanup_zombies(project_root=root, kill=True)
-    killed = int(res.get("killed_count") or 0)
-    if log_callback:
-        log_callback(
-            f"[*] {reason}: orphan browsers before={res.get('before_zombies')} "
-            f"killed={killed} after={res.get('after_zombies')}"
-        )
-    return res
-
-
 def _quit_browser_instance(browser, log_callback=None, del_data=True):
-    """Graceful quit first, then force-kill residual Chromium processes."""
+    """Graceful quit first, then force-kill residual Chromium processes.
+
+    Capture the full process tree *before* quit(). On Windows, DrissionPage
+    quit() may exit the root first and reparent children under init, so a
+    post-quit children() walk can miss leftovers.
+    """
     if browser is None:
         return
 
     wait_sec = max(float(config.get("browser_shutdown_wait_sec", 4) or 4), 0)
-    pid = _browser_process_id(browser)
+    pid = _browser_process_id(browser) or _get_browser_root_pid()
+    victims = _collect_pid_tree(pid)
 
     try:
         # DrissionPage: force=True uses SystemInfo PIDs after Browser.close
@@ -2612,19 +2675,32 @@ def _quit_browser_instance(browser, log_callback=None, del_data=True):
             log_callback(f"[Debug] browser.quit failed: {exc}")
 
     deadline = time.time() + wait_sec
-    while (_browser_is_alive(browser) or _pid_is_running(pid)) and time.time() < deadline:
+    while True:
+        alive_browser = _browser_is_alive(browser)
+        alive_pid = any(_pid_is_running(p) for p in victims) if victims else _pid_is_running(pid)
+        if not (alive_browser or alive_pid):
+            break
+        if time.time() >= deadline:
+            break
         time.sleep(0.1)
 
-    still_alive = _browser_is_alive(browser) or _pid_is_running(pid)
-    if still_alive:
-        # quit() may clear process_id; keep the pre-quit PID for the hard kill.
-        kill_pid = pid or _browser_process_id(browser)
-        if kill_pid:
+    still = [p for p in victims if _pid_is_running(p)]
+    if not still and pid and _pid_is_running(pid):
+        still = [int(pid)]
+    if still or _browser_is_alive(browser):
+        if still:
             if log_callback:
-                log_callback(f"[!] browser still alive, force-kill pid={kill_pid}")
-            _force_kill_pid_tree(kill_pid, log_callback=log_callback)
-        elif log_callback:
-            log_callback("[!] browser still alive, but process pid is unavailable")
+                log_callback(f"[!] browser still alive, force-kill pids={still}")
+            _force_kill_pids(still, log_callback=log_callback)
+        else:
+            kill_pid = pid or _browser_process_id(browser) or _get_browser_root_pid()
+            if kill_pid:
+                if log_callback:
+                    log_callback(f"[!] browser still alive, force-kill pid={kill_pid}")
+                _force_kill_pid_tree(kill_pid, log_callback=log_callback)
+            elif log_callback:
+                log_callback("[!] browser still alive, but process pid is unavailable")
+    _set_browser_root_pid(None)
 
 
 def _browser_is_alive(browser):
@@ -2673,11 +2749,7 @@ def start_browser(log_callback=None):
             try:
                 browser = Chromium(create_browser_options())
                 _set_browser(browser)
-                try:
-                    from panel.browser_monitor import register_browser
-                    register_browser(browser, purpose="register", worker_id=_get_worker_id())
-                except Exception:
-                    pass
+                _set_browser_root_pid(_browser_process_id(browser))
                 page = _select_single_browser_tab(browser, log_callback=log_callback)
                 if log_callback and getattr(browser, "user_data_path", None):
                     log_callback(f"[Debug] 当前浏览器资料目录: {browser.user_data_path}")
@@ -2701,15 +2773,12 @@ def stop_browser(log_callback=None):
         _set_page(None)
         if browser is not None:
             try:
-                from panel.browser_monitor import unregister_browser
-                unregister_browser(browser)
-            except Exception:
-                pass
-            try:
                 profile_path = getattr(browser, "user_data_path", None)
             except Exception:
                 profile_path = None
             _quit_browser_instance(browser, log_callback=log_callback, del_data=True)
+        else:
+            _set_browser_root_pid(None)
         if profile_path:
             try:
                 import shutil
@@ -2722,11 +2791,6 @@ def stop_browser(log_callback=None):
                     shutil.rmtree(abs_profile, ignore_errors=True)
             except Exception:
                 pass
-        # Always sweep managed leftovers (Drission autoPort / .browser_profiles).
-        try:
-            cleanup_orphan_browsers(log_callback=log_callback, reason="stop_browser sweep")
-        except Exception:
-            pass
 
 
 def restart_browser(log_callback=None):
@@ -2846,11 +2910,6 @@ def cleanup_runtime_memory(log_callback=None, reason="定期清理"):
     except Exception as exc:
         if log_callback:
             log_callback(f"[Debug] mint browser cleanup failed: {exc}")
-    try:
-        cleanup_orphan_browsers(log_callback=log_callback, reason=reason)
-    except Exception as exc:
-        if log_callback:
-            log_callback(f"[Debug] orphan browser cleanup failed: {exc}")
     collected = gc.collect()
     if log_callback:
         log_callback(f"[*] Python GC 已回收对象数: {collected}")
@@ -3427,7 +3486,7 @@ return 'enter';
     raise Exception("未找到邮箱输入框或注册按钮")
 
 
-def fill_code_and_submit(email, dev_token, timeout=180, log_callback=None, cancel_callback=None):
+def fill_code_and_submit(email, dev_token, timeout=300, log_callback=None, cancel_callback=None):
     """填写邮箱验证码并提交。
 
     键入逻辑对齐 https://github.com/Git-creat7/grokRegister-cpa ：
@@ -3451,9 +3510,63 @@ return false;
         except Exception:
             return False
 
+    # 进入验证码页前，页面可能先卡 Cloudflare/人机验证；先给人工时间，不要秒失败。
+    captcha_wait_deadline = time.time() + 120
+    while time.time() < captcha_wait_deadline:
+        raise_if_cancelled(cancel_callback)
+        try:
+            page_state = _get_page().run_js(
+                r"""
+function isVisible(node) {
+  if (!node) return false;
+  const style = window.getComputedStyle(node);
+  if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+  const rect = node.getBoundingClientRect();
+  return rect.width > 0 && rect.height > 0;
+}
+const codeInputs = Array.from(document.querySelectorAll(
+  'input[data-input-otp="true"], input[name="code"], input[name="otp"], input[autocomplete="one-time-code"], input[inputmode="numeric"], input[maxlength="1"]'
+)).filter((n) => isVisible(n) && !n.disabled);
+const hasCodeUI = codeInputs.length > 0;
+const cfInput = document.querySelector('input[name="cf-turnstile-response"]');
+const cfPresent = !!cfInput
+  || !!document.querySelector('iframe[src*="turnstile"], div.cf-turnstile, [data-sitekey], script[src*="turnstile"], iframe[src*="challenges.cloudflare"]');
+const cfSolved = !!(cfInput && String(cfInput.value || '').trim().length >= 80);
+const text = (document.body && (document.body.innerText || document.body.textContent) || '').toLowerCase();
+const mentionsCode = text.includes('verification') || text.includes('verify') || text.includes('验证码') || text.includes('code');
+return {
+  hasCodeUI,
+  cfPresent,
+  cfSolved,
+  mentionsCode,
+  url: location.href
+};
+"""
+            )
+        except Exception:
+            page_state = {}
+        if isinstance(page_state, dict) and page_state.get("hasCodeUI"):
+            if log_callback:
+                log_callback("[*] 已检测到验证码输入框，开始拉取邮箱验证码")
+            break
+        if isinstance(page_state, dict) and page_state.get("cfPresent") and not page_state.get("cfSolved"):
+            # try auto assist, but mainly wait for manual
+            try:
+                getTurnstileToken(log_callback=log_callback, cancel_callback=cancel_callback)
+            except Exception:
+                pass
+            if log_callback:
+                remain = int(max(captcha_wait_deadline - time.time(), 0))
+                log_callback(f"[*] 页面仍有人机验证，请在浏览器完成验证（剩余约 {remain}s）")
+            sleep_with_cancel(2, cancel_callback)
+            continue
+        # no clear code UI yet, keep waiting a bit
+        sleep_with_cancel(1, cancel_callback)
+
     code = get_oai_code(
         dev_token,
         email,
+        timeout=max(int(timeout or 300), 300),
         log_callback=log_callback,
         cancel_callback=cancel_callback,
         resend_callback=_resend_code,
@@ -3616,7 +3729,7 @@ return 'clicked';
 
         sleep_with_cancel(0.5, cancel_callback)
 
-    raise Exception("验证码已获取，但自动填写/提交失败")
+    raise Exception("验证码已获取，但自动填写/提交失败。请确认浏览器验证码框仍在，并给足时间手动确认。")
 
 
 
@@ -3631,8 +3744,10 @@ def getTurnstileToken(log_callback=None, cancel_callback=None):
     except Exception:
         pass
 
-    for _ in range(0, 20):
+    for i in range(0, 120):  # up to ~120s, allow manual captcha
         raise_if_cancelled(cancel_callback)
+        if log_callback and i > 0 and i % 10 == 0:
+            log_callback(f"[*] 等待 Cloudflare/验证码通过中... ({i}s/120s) 请在浏览器里完成验证")
         try:
             token = _get_page().run_js(
                 """
@@ -3696,7 +3811,7 @@ if (nodes.length && typeof nodes[0].click === 'function') nodes[0].click();
             pass
         sleep_with_cancel(1, cancel_callback)
 
-    raise Exception("Turnstile 获取 token 失败")
+    raise Exception("Turnstile/人机验证超时（已等待约120s，仍未通过）。请在浏览器完成验证后重试。")
 
 
 def build_profile():
@@ -4098,7 +4213,7 @@ def wait_for_sso_cookie(timeout=120, log_callback=None, cancel_callback=None):
     last_cf_retry_at = 0.0
     final_no_submit_state = ""
     final_no_submit_since = None
-    final_no_submit_timeout = 25
+    final_no_submit_timeout = 120
 
     while time.time() < deadline:
         raise_if_cancelled(cancel_callback)
@@ -4932,7 +5047,7 @@ class GrokRegisterGUI:
                 break
             except Exception as mail_exc:
                 msg = str(mail_exc)
-                if ("未收到验证码" in msg or "验证码" in msg) and mail_try < max_mail_retry:
+                if (("未收到验证码" in msg) or ("内未收到验证码邮件" in msg) or ("获取验证码失败" in msg and "自动填写" not in msg)) and mail_try < max_mail_retry:
                     log_fn(f"[!] 本邮箱未取到验证码，自动更换新邮箱重试: {msg}")
                     restart_browser(log_callback=log_fn)
                     sleep_with_cancel(1, self.should_stop)
@@ -5133,7 +5248,7 @@ def _register_one_account_cli(log_fn, stop_fn, accounts_output_file):
             break
         except Exception as mail_exc:
             msg = str(mail_exc)
-            if ("未收到验证码" in msg or "验证码" in msg) and mail_try < max_mail_retry:
+            if (("未收到验证码" in msg) or ("内未收到验证码邮件" in msg) or ("获取验证码失败" in msg and "自动填写" not in msg)) and mail_try < max_mail_retry:
                 log_fn(f"[!] 本邮箱未取到验证码，自动更换新邮箱重试: {msg}")
                 restart_browser(log_callback=log_fn)
                 sleep_with_cancel(1, stop_fn)
@@ -5242,7 +5357,7 @@ def _cli_worker_loop(worker_id, task_queue, total_count, controller, accounts_ou
         stop_browser()
 
 
-def run_registration_cli(count):
+def run_registration_cli(count, pool_watch=None):
     # Ensure local GoProxy is up and proxy strings bound before CLI workers start.
     try:
         prepare_goproxy_for_registration(log_callback=cli_log)
@@ -5259,6 +5374,74 @@ def run_registration_cli(count):
     worker_count = min(worker_count, max(1, int(count or 1)))
     stats = {"success": 0, "fail": 0, "lock": threading.Lock()}
     stop_speed = threading.Event()
+    stop_pool_watch = threading.Event()
+    pool_watch = dict(pool_watch or {}) if pool_watch else None
+    task_queue_holder = {"q": None}
+
+    def _pool_watch_loop():
+        """注册过程中持续重查账号池；达到停止目标则优雅停止，避免按旧缺口超补。"""
+        if not pool_watch:
+            return
+        try:
+            interval = float(pool_watch.get("interval_sec") or 15)
+        except Exception:
+            interval = 15.0
+        interval = max(interval, 5.0)
+        target = int(pool_watch.get("target_count") or count or 0)
+        source = pool_watch.get("source") or config.get("pool_autoreg_source") or "remote"
+        root = pool_watch.get("root") or os.path.dirname(__file__)
+        cfg = dict(config)
+        # ensure pool settings present
+        for k, v in pool_watch.items():
+            if k.startswith("pool_") or k in {"cpa_remote_enabled", "cpa_remote_base", "cpa_remote_management_key", "cpa_auth_dir"}:
+                cfg[k] = v
+        cli_log(
+            f"[pool-watch] 过程监控已开启: source={source} target={target} interval={int(interval)}s"
+        )
+        while not stop_pool_watch.is_set() and not controller.should_stop():
+            try:
+                from panel.pool_autoreg import pool_counts
+
+                counts = pool_counts(cfg, root=root, source=source)
+                if counts.get("ok"):
+                    total = int(counts.get("total") or 0)
+                    used = counts.get("used_source") or source
+                    if total >= target:
+                        cli_log(
+                            f"[pool-watch] 当前{used}数量={total} 已达停止目标 {target}，停止继续注册（防止按旧缺口超补）"
+                        )
+                        controller.stop()
+                        q = task_queue_holder.get("q")
+                        if q is not None:
+                            drained = 0
+                            while True:
+                                try:
+                                    q.get_nowait()
+                                    drained += 1
+                                except Exception:
+                                    break
+                            if drained:
+                                cli_log(f"[pool-watch] 已丢弃未开始任务 {drained} 个")
+                        break
+                    else:
+                        # 低频提示，避免刷屏：只在整分钟附近或 debug 可看 success 统计
+                        pass
+                else:
+                    cli_log(f"[pool-watch] 重查失败: {counts.get('error') or 'unknown'}")
+            except Exception as exc:
+                cli_log(f"[pool-watch] 重查异常: {exc}")
+            # interruptible sleep
+            steps = max(int(interval * 2), 1)
+            for _ in range(steps):
+                if stop_pool_watch.is_set() or controller.should_stop():
+                    break
+                time.sleep(0.5)
+
+    pool_watch_thread = None
+    if pool_watch and bool(pool_watch.get("enabled", True)):
+        pool_watch_thread = threading.Thread(
+            target=_pool_watch_loop, name="pool-watch", daemon=True
+        )
     interval = float(config.get("speed_log_interval_sec", 60) or 60)
 
     def _cli_counts():
@@ -5281,6 +5464,9 @@ def run_registration_cli(count):
             task_queue = queue.Queue()
             for idx in range(count):
                 task_queue.put(idx)
+            task_queue_holder["q"] = task_queue
+            if pool_watch_thread is not None and not pool_watch_thread.is_alive():
+                pool_watch_thread.start()
             threads = []
             for wid in range(worker_count):
                 if controller.should_stop():
@@ -5310,6 +5496,9 @@ def run_registration_cli(count):
                 )
         else:
             start_browser(log_callback=cli_log)
+
+            if pool_watch_thread is not None and not pool_watch_thread.is_alive():
+                pool_watch_thread.start()
             cli_log("[*] 浏览器已启动")
             restart_every = int(config.get("browser_restart_every", 10) or 0)
             i = 0
@@ -5372,6 +5561,7 @@ def run_registration_cli(count):
         cli_log(f"[!] 任务异常: {exc}")
     finally:
         stop_speed.set()
+        stop_pool_watch.set()
         try:
             speed_thread.join(timeout=2)
         except Exception:

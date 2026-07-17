@@ -71,10 +71,14 @@ class BrowserLifecycleTests(unittest.TestCase):
         app.config["browser_shutdown_wait_sec"] = 0.05
         app._set_browser(None)
         app._set_page(None)
+        if hasattr(app, "_set_browser_root_pid"):
+            app._set_browser_root_pid(None)
 
     def tearDown(self):
         app._set_browser(self.original_browser)
         app._set_page(self.original_page)
+        if hasattr(app, "_set_browser_root_pid"):
+            app._set_browser_root_pid(None)
         if self.original_wait is None:
             app.config.pop("browser_shutdown_wait_sec", None)
         else:
@@ -116,30 +120,26 @@ class BrowserLifecycleTests(unittest.TestCase):
     def test_stop_force_kills_when_browser_process_stays_alive(self):
         old = StickyBrowser([FakeTab()], process_id=424242)
         app._set_browser(old)
-        with patch.object(app, "_pid_is_running", side_effect=[True, False]), patch.object(app, "_force_kill_pid_tree", return_value=True) as kill, patch.object(app, "cleanup_orphan_browsers", return_value={"ok": True, "killed_count": 0}):
+        with patch.object(app, "_pid_is_running", return_value=True),              patch.object(app, "_collect_pid_tree", return_value=[424242, 424243]),              patch.object(app, "_force_kill_pids", return_value=True) as kill:
             app.stop_browser()
         self.assertEqual(old.quit_count, 1)
         self.assertTrue(old.quit_kwargs[0]["force"])
         kill.assert_called_once()
-        self.assertEqual(kill.call_args.args[0], 424242)
+        self.assertEqual(kill.call_args.args[0], [424242, 424243])
         self.assertIsNone(app._get_browser())
 
     def test_cleanup_runtime_memory_shuts_down_mint_browsers(self):
-        with patch.object(app, "stop_browser") as stop, patch("cpa_xai.browser_confirm.shutdown_mint_browsers") as shutdown, patch.object(app, "cleanup_orphan_browsers", return_value={"ok": True}) as orphan, patch.object(app.gc, "collect", return_value=0):
+        with patch.object(app, "stop_browser") as stop,              patch("cpa_xai.browser_confirm.shutdown_mint_browsers") as shutdown,              patch.object(app.gc, "collect", return_value=0):
             app.cleanup_runtime_memory()
         stop.assert_called_once()
         shutdown.assert_called_once()
-        orphan.assert_called_once()
 
-
-    def test_finalize_all_browsers_cleans_orphans(self):
-        with patch.object(app, "stop_browser") as stop, patch("cpa_xai.browser_confirm.shutdown_mint_browsers") as shutdown, patch.object(app, "cleanup_orphan_browsers", return_value={"ok": True, "killed_count": 1}) as orphan:
+    def test_finalize_all_browsers_closes_register_and_mint(self):
+        with patch.object(app, "stop_browser") as stop,              patch("cpa_xai.browser_confirm.shutdown_mint_browsers") as shutdown:
             app.finalize_all_browsers()
         stop.assert_called_once()
         shutdown.assert_called_once()
-        orphan.assert_called_once()
 
 
 if __name__ == "__main__":
-
     unittest.main()

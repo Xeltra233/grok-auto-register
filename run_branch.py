@@ -40,7 +40,7 @@ def cmd_panel(args: argparse.Namespace) -> int:
         auto_goproxy = True
     server = run_panel(host=host, port=port, auto_start_goproxy=auto_goproxy)
     print(f"[branch] panel listening on {server.url}")
-    print("[branch] features: browser monitor / log cleanup / pool autoreg / credentials")
+    print("[branch] features: log cleanup / pool autoreg / credentials")
     if auto_goproxy:
         print("[branch] GoProxy auto-start requested (if enabled in config)")
     try:
@@ -82,7 +82,6 @@ def cmd_status(_args: argparse.Namespace) -> int:
     cfg = _load_cfg()
     from panel.settings import describe_proxy_selection, normalize_branch_config
     from panel.credentials import list_credentials
-    from panel.browser_monitor import summary as browser_summary
     from panel.pool_autoreg import pool_counts, status as pool_status
 
     cfg = normalize_branch_config(cfg)
@@ -106,10 +105,6 @@ def cmd_status(_args: argparse.Namespace) -> int:
             "status": pool_status(),
         },
         "credentials": list_credentials(cfg, buckets=("uploaded", "pending"), root=ROOT).get("counts"),
-        "browsers": {
-            "registered": browser_summary(project_root=str(ROOT)).get("registered"),
-            "zombies": browser_summary(project_root=str(ROOT)).get("zombies"),
-        },
         "live_inspect_enabled": cfg.get("live_inspect_enabled"),
         "log_cleanup_enabled": cfg.get("log_cleanup_enabled"),
     }

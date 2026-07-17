@@ -267,6 +267,65 @@ def _browser_pid(browser: Any) -> int | None:
     return None
 
 
+def _collect_pid_tree(pid: int | None) -> list[int]:
+    pids: list[int] = []
+    if not pid:
+        return pids
+    try:
+        pid_i = int(pid)
+    except Exception:
+        return pids
+    pids.append(pid_i)
+    try:
+        import psutil
+
+        root = psutil.Process(pid_i)
+        for child in root.children(recursive=True):
+            try:
+                pids.append(int(child.pid))
+            except Exception:
+                pass
+    except Exception:
+        pass
+    seen: set[int] = set()
+    out: list[int] = []
+    for p in pids:
+        if p in seen:
+            continue
+        seen.add(p)
+        out.append(p)
+    return out
+
+
+def _force_kill_pids(pids: list[int] | None, log: LogFn | None = None) -> None:
+    if not pids:
+        return
+    log = log or _noop_log
+    try:
+        import psutil
+    except Exception as e:  # noqa: BLE001
+        log(f"psutil unavailable for browser kill pids={pids}: {e}")
+        return
+    procs = []
+    for pid in pids:
+        try:
+            procs.append(psutil.Process(int(pid)))
+        except Exception:
+            continue
+    if not procs:
+        return
+    for proc in procs:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+    try:
+        psutil.wait_procs(procs, timeout=2)
+    except Exception:
+        pass
+    log(f"force-killed browser pid snapshot count={len(procs)} pids={sorted({int(p.pid) for p in procs})}")
+
+
 def _force_kill_browser_pid(pid: int | None, log: LogFn | None = None) -> None:
     if not pid:
         return
@@ -299,11 +358,15 @@ def _force_kill_browser_pid(pid: int | None, log: LogFn | None = None) -> None:
 
 
 def close_standalone(browser: Any, log: LogFn | None = None) -> None:
-    """Close a Chromium instance; force-kill residual OS processes if needed."""
+    """Close a Chromium instance; force-kill residual OS processes if needed.
+
+    Snapshot the full process tree before quit so reparented children are not missed.
+    """
     if browser is None:
         return
     log = log or _noop_log
     pid = _browser_pid(browser)
+    victims = _collect_pid_tree(pid)
     try:
         _unregister_mint_browser(browser)
     except Exception:
@@ -318,22 +381,27 @@ def close_standalone(browser: Any, log: LogFn | None = None) -> None:
     except Exception as e:  # noqa: BLE001
         log(f"browser.quit failed: {e}")
 
-    # Residual process check
-    alive = False
+    # Residual process check against pre-quit PID snapshot
+    still = []
     try:
-        states = getattr(browser, "states", None)
-        alive = bool(getattr(states, "is_alive", False)) if states is not None else False
-    except Exception:
-        alive = False
-    if not alive and pid:
-        try:
-            import psutil
+        import psutil
 
-            alive = psutil.pid_exists(int(pid))
+        still = [p for p in victims if psutil.pid_exists(int(p))]
+    except Exception:
+        still = list(victims) if victims else ([int(pid)] if pid else [])
+
+    alive = bool(still)
+    if not alive:
+        try:
+            states = getattr(browser, "states", None)
+            alive = bool(getattr(states, "is_alive", False)) if states is not None else False
         except Exception:
             alive = False
     if alive:
-        _force_kill_browser_pid(pid or _browser_pid(browser), log=log)
+        if still:
+            _force_kill_pids(still, log=log)
+        else:
+            _force_kill_browser_pid(pid or _browser_pid(browser), log=log)
 
 
 # ── mint browser reuse (per-thread) ──
@@ -358,11 +426,6 @@ def _register_mint_browser(browser: Any) -> None:
     with _mint_browsers_lock:
         _mint_active_browsers.add(key)
         _mint_browser_objs[key] = browser
-    try:
-        from panel.browser_monitor import register_browser
-        register_browser(browser, purpose="cpa_mint")
-    except Exception:
-        pass
 
 
 def _unregister_mint_browser(browser: Any) -> None:
@@ -372,11 +435,6 @@ def _unregister_mint_browser(browser: Any) -> None:
     with _mint_browsers_lock:
         _mint_active_browsers.discard(key)
         _mint_browser_objs.pop(key, None)
-    try:
-        from panel.browser_monitor import unregister_browser
-        unregister_browser(browser)
-    except Exception:
-        pass
 
 
 def clear_page_session(page: Any, browser: Any | None = None, log: LogFn | None = None) -> None:

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Grok Panel · Glass</title>
+  <title>Grok Panel · 清澈玻璃面板</title>
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
@@ -16,116 +16,211 @@
       <div class="logo">G</div>
       <div>
         <div class="title">Grok Auto Panel</div>
-        <div class="subtitle">本地合并 GoProxy · 浏览器监控 · 凭证库 · 实时同步</div>
+        <div class="subtitle">本地面板 · 左侧分区 · 本机凭证 · 实时同步</div>
       </div>
     </div>
     <div class="top-actions">
       <div id="liveBadge" class="live-badge off">LIVE · 连接中</div>
       <div id="lastSync" class="last-sync">上次同步: -</div>
       <button id="btnRefresh" class="btn">立即刷新</button>
-      <button id="btnCleanupBrowsers" class="btn danger">清理僵尸浏览器</button>
-      <button id="btnLogCleanup" class="btn">清理日志</button>
+      <button id="btnLogout" class="btn">退出登录</button>
     </div>
   </header>
 
-  <main class="layout">
-    <section class="card glass">
-      <h2>总览</h2>
-      <div class="metrics" id="metrics">
-        <div class="metric"><span>注册浏览器</span><b id="mReg">-</b></div>
-        <div class="metric"><span>僵尸进程</span><b id="mZombie">-</b></div>
-        <div class="metric"><span>GoProxy</span><b id="mProxy">-</b></div>
-        <div class="metric"><span>已推送凭证</span><b id="mUploaded">-</b></div>
+  <div class="shell">
+    <aside class="sidebar glass">
+      <button class="nav-btn active" data-tab="overview">总览</button>
+      <button class="nav-btn" data-tab="register">注册设置</button>
+      <button class="nav-btn" data-tab="proxy">本地代理</button>
+      <button class="nav-btn" data-tab="credentials">本地凭证</button>
+      <button class="nav-btn" data-tab="system">系统维护</button>
+      <div class="nav-note">
+        说明：凭证下载/删除操作的是本机产出文件。<br/>
+        远端 CPA 只负责“推送”。<br/>
+        “绑定”= 注册机/CPA 代理改走本机 GoProxy 端口。
       </div>
-      <div class="hint-row">
-        <span class="pill" id="pillLive">测活门槛: -</span>
-        <span class="pill" id="pillBind">代理绑定: -</span>
-      </div>
-      <pre id="overviewExtra" class="mono muted"></pre>
-    </section>
+    </aside>
 
-    <section class="card glass">
-      <h2>本地代理（GoProxy）</h2>
-      <div class="row">
-        <label>池模式
-          <select id="poolMode"></select>
-        </label>
-        <label>接入端口
-          <select id="endpoint"></select>
-        </label>
-        <label class="check"><input type="checkbox" id="bindProxy" /> 绑定到 register/cpa proxy</label>
-      </div>
-      <div class="row">
-        <button id="btnProxyStart" class="btn primary">启动</button>
-        <button id="btnProxyStop" class="btn">停止</button>
-        <button id="btnProxyRestart" class="btn">重启</button>
-        <button id="btnApplyProxy" class="btn primary">应用模式/端口</button>
-      </div>
-      <div class="chips" id="portChips"></div>
-      <pre id="proxyStatus" class="mono"></pre>
-    </section>
-
-    <section class="card glass wide">
-      <div class="row between wrap-head">
-        <div>
-          <h2>CPA 凭证库</h2>
-          <p class="section-sub">支持多选 / 全选下载；删除默认仅限已推送 uploaded</p>
+    <main class="content">
+      <section id="tab-overview" class="tab-panel active">
+        <div class="card glass">
+          <h2>总览</h2>
+          <div class="metrics">
+            <div class="metric"><span>本地代理</span><b id="mProxy">-</b></div>
+            <div class="metric"><span>账号池数量</span><b id="mPool">-</b></div>
+          </div>
+          <div class="hint-row">
+            <span class="pill" id="pillLive">测活门槛: -</span>
+            <span class="pill" id="pillBind">代理绑定: -</span>
+            <span class="pill" id="pillPool">账号池: -</span>
+            <span class="pill" id="pillSource">统计来源: -</span>
+          </div>
+          <pre id="overviewExtra" class="mono muted"></pre>
         </div>
-        <div class="row actions-tight">
-          <button id="btnSelectAll" class="btn">全选已推送</button>
-          <button id="btnDownload" class="btn primary">下载选中</button>
-          <button id="btnDownloadAllUploaded" class="btn">下载全部已推送</button>
-          <button id="btnDeleteSelected" class="btn danger">删除选中已推送</button>
-          <button id="btnDeleteAllUploaded" class="btn danger">一键删除已推送</button>
+      </section>
+
+      <section id="tab-register" class="tab-panel">
+        <div class="card glass">
+          <h2>注册设置</h2>
+          <p class="section-sub">注册相关参数统一在这里改。远端账号池低于“触发阈值”才开始补注册，并一次补到“停止目标”，中间缺口用多线程一次性干完。</p>
+          <div class="form-grid">
+            <label>邮箱提供商
+              <select id="cfgEmailProvider">
+                <option value="duckmail">duckmail</option>
+                <option value="yyds">yyds</option>
+                <option value="cloudflare">cloudflare</option>
+                <option value="freemail">freemail</option>
+                <option value="icloud_hme">icloud_hme</option>
+              </select>
+            </label>
+<label>线程数 / 并发数（补货时按目标缺口一次开满，受此限制）<input id="cfgConcurrent" type="number" min="1" /></label>
+            <label>浏览器重启间隔<input id="cfgBrowserRestart" type="number" min="1" /></label>
+            <label>日志级别
+              <select id="cfgLogLevel">
+                <option value="debug">debug</option>
+                <option value="info">info</option>
+                <option value="warning">warning</option>
+                <option value="error">error</option>
+              </select>
+            </label>
+            <label class="check"><input id="cfgEnableNsfw" type="checkbox" /> 启用 NSFW 相关流程</label>
+            <label class="full">DuckMail API Key<input id="cfgDuckmailKey" type="text" /></label>
+            <label>FreeMail API Base<input id="cfgFreemailBase" type="text" /></label>
+            <label>FreeMail JWT<input id="cfgFreemailJwt" type="password" /></label>
+            <label class="full">FreeMail Domain<input id="cfgFreemailDomain" type="text" /></label>
+            <label>iCloud HME API Base<input id="cfgIcloudBase" type="text" /></label>
+            <label>iCloud Account ID<input id="cfgIcloudAccount" type="text" /></label>
+            <label class="full">iCloud Label<input id="cfgIcloudLabel" type="text" /></label>
+            <label>Cloudflare API Base<input id="cfgCfBase" type="text" /></label>
+            <label>Cloudflare API Key<input id="cfgCfKey" type="password" /></label>
+            <label>Cloudflare Auth Mode<input id="cfgCfMode" type="text" /></label>
+            <label class="check"><input id="cfgLiveInspect" type="checkbox" /> 启用测活门槛</label>
+            <label class="check"><input id="cfgSuccessRequireLive" type="checkbox" /> 测活通过才保存/推送</label>
+            <label class="check"><input id="cfgCpaExport" type="checkbox" /> 启用 CPA 导出</label>
+            <label class="check"><input id="cfgCpaMintAsync" type="checkbox" /> CPA mint 异步</label>
+            <label class="full">CPA 代理覆盖（可空；留空则跟随全局代理）<input id="cfgCpaProxy" type="text" /></label>
+            <label class="check"><input id="cfgCpaRemoteEnabled" type="checkbox" /> 启用远端 CPA 推送</label>
+            <label class="full">远端 CPA Base<input id="cfgCpaRemoteBase" type="text" /></label>
+            <label class="full">远端 Management Key<input id="cfgCpaRemoteKey" type="password" /></label>
+            <label class="check"><input id="cfgPoolEnabled" type="checkbox" /> 开启账号池自动补注册</label>
+            <label>账号池统计来源
+              <select id="cfgPoolSource">
+                <option value="remote">远端 CPA（推荐）</option>
+                <option value="local">仅本地凭证</option>
+                <option value="remote_then_local">远端优先，失败再本地</option>
+              </select>
+            </label>
+            <label>触发注册阈值（低于此数开始）<input id="cfgPoolMin" type="number" min="0" /></label>
+            <label>停止目标数量（补到此数停止）<input id="cfgPoolTarget" type="number" min="0" /></label>
+            <label>巡检间隔（秒）<input id="cfgPoolInterval" type="number" min="30" /></label>
+            <label>全局代理模式
+              <select id="cfgProxyMode">
+                <option value="custom">自有代理</option>
+                <option value="goproxy">本机 GoProxy</option>
+              </select>
+            </label>
+            <label class="full">自有代理地址（仅“自有代理”模式使用）
+              <input id="cfgProxy" type="text" placeholder="例如 http://127.0.0.1:7890" />
+            </label>
+            <div class="full-note">全局代理：注册机和 CPA 都走同一选择。选 GoProxy 时自动绑定本机端口，不再单独“绑定”。</div>
+            <label class="check"><input id="cfgRemoteLiveEnabled" type="checkbox" /> 开启远端 CPA 测活巡检</label>
+            <label class="check"><input id="cfgRemoteLiveDelete" type="checkbox" /> 测活失败/额度用尽删除远端账号</label>
+            <label>远端测活间隔（秒，默认 7200=2小时）<input id="cfgRemoteLiveInterval" type="number" min="60" /></label>
+            <label>远端测活模型<input id="cfgRemoteLiveModel" type="text" /></label>
+            <label>单次最多测活数量（0=全部）<input id="cfgRemoteLiveMax" type="number" min="0" /></label>
+            <label>远端测活并发批次（默认 6）<input id="cfgRemoteLiveBatch" type="number" min="1" max="32" /></label>
+            </div>
+          <p class="action-hint">操作说明：保存设置不会启动任务；“手动开始注册”按线程启动；“账号池补到停止目标”按 触发线→停止目标 的整段缺口补货。</p>
+          <div class="row actions">
+            <button id="btnSaveRegister" class="btn primary">保存设置</button>
+            <button id="btnStartManualRegister" class="btn primary">手动开始注册（按线程）</button>
+            <button id="btnPoolRefill" class="btn">账号池补到停止目标</button>
+            <button id="btnPoolCheck" class="btn">仅检查账号池</button>
+            <button id="btnRemoteLiveCheck" class="btn">立即远端测活</button>
+          </div>
+          <pre id="registerStatus" class="mono muted"></pre>
         </div>
-      </div>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th><input type="checkbox" id="checkAllVisible" /></th>
-              <th>名称</th>
-              <th>桶</th>
-              <th>大小</th>
-              <th>时间</th>
-            </tr>
-          </thead>
-          <tbody id="credBody"></tbody>
-        </table>
-        <div id="credEmpty" class="empty-state hidden">暂无凭证。注册并测活通过后会出现在 pending / uploaded。</div>
-      </div>
-      <p class="muted">默认删除/全量下载仅针对 <code>uploaded</code>，不会动 pending。列表随后端 SSE/轮询实时刷新。</p>
-    </section>
+      </section>
 
-    <section class="card glass wide">
-      <div class="row between">
-        <h2>浏览器实例</h2>
-        <div class="muted" id="browserSummaryText">registered 0 · zombies 0</div>
-      </div>
-      <div class="table-wrap browser-table">
-        <table>
-          <thead>
-            <tr>
-              <th>用途</th>
-              <th>PID</th>
-              <th>Worker</th>
-              <th>存活</th>
-              <th>时长</th>
-              <th>Profile</th>
-            </tr>
-          </thead>
-          <tbody id="browserBody"></tbody>
-        </table>
-        <div id="browserEmpty" class="empty-state hidden">当前没有已注册浏览器实例。</div>
-      </div>
-      <details class="raw-details">
-        <summary>原始监控 JSON</summary>
-        <pre id="browserDetails" class="mono"></pre>
-      </details>
-    </section>
-  </main>
+      <section id="tab-proxy" class="tab-panel">
+        <div class="card glass">
+          <h2>本地代理（GoProxy）</h2>
+          <p class="section-sub">这里的“绑定”意思是：把注册机 / CPA 的代理地址，改成走本机 GoProxy 端口。不是登录绑定，也不是远端绑定。</p>
+          <div class="row">
+            <label>代理池模式<select id="poolMode"></select></label>
+            <label>使用哪个本地端口<select id="endpoint"></select></label>
+            <p class="muted tiny" id="proxyModeHint">代理模式请在“注册设置”里选：自有代理 / 本机 GoProxy。</p>
+          </div>
+          <p class="muted tiny">订阅节点请在 GoProxy 管理页添加。远端 CPA 只负责推送凭证，不负责下载。</p>
+          <div class="row">
+            <button id="btnProxyStart" class="btn primary">启动本地代理</button>
+            <button id="btnProxyStop" class="btn">停止</button>
+            <button id="btnProxyRestart" class="btn">重启</button>
+            <button id="btnApplyProxy" class="btn primary">应用模式/端口</button>
+            <button id="btnOpenWebui" class="btn">打开 GoProxy 管理页</button>
+          </div>
+          <div class="chips" id="portChips"></div>
+          <pre id="proxyStatus" class="mono"></pre>
+        </div>
+      </section>
 
-  <div id="toast" class="toast glass hidden"></div>
+      <section id="tab-credentials" class="tab-panel">
+        <div class="card glass">
+          <h2>本地凭证库（本机产出）</h2>
+          <p class="section-sub">这里展示/下载/删除的是本机注册产出的凭证文件。远端只提供“推送”功能，不从远端拉回凭证。</p>
+          <div class="row actions">
+            <button id="btnSelectAll" class="btn">全选已推送</button>
+            <button id="btnDownload" class="btn primary">下载选中</button>
+            <button id="btnDownloadAllUploaded" class="btn">下载全部已推送</button>
+            <button id="btnDeleteSelected" class="btn danger">删除选中已推送</button>
+            <button id="btnDeleteAllUploaded" class="btn danger">一键删除已推送</button>
+            <button id="btnLocalCredPrune2" class="btn">按保留数清理本地</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th><input type="checkbox" id="checkAllVisible" /></th>
+                  <th>文件名</th>
+                  <th>状态</th>
+                  <th>大小</th>
+                  <th>时间</th>
+                </tr>
+              </thead>
+              <tbody id="credBody"></tbody>
+            </table>
+            <div id="credEmpty" class="empty-state hidden">暂无本机凭证。注册并测活通过后会出现在“待推送/已推送”。</div>
+          </div>
+          <p class="muted tiny">状态说明：pending=待推送（本机已产出，还没推远端）；uploaded=已推送（本机文件已推到远端）。下载/删除都是操作本机文件。</p>
+        </div>
+      </section>
+
+
+      <section id="tab-system" class="tab-panel">
+        <div class="card glass">
+          <h2>系统维护</h2>
+          <p class="section-sub">登录密码请用环境变量 <code>GROK_PANEL_PASSWORD</code>（或 PANEL_PASSWORD）。登录页会写 Cookie，不在面板里配置 token。</p>
+          <p class="section-sub">日志清理、本机凭证保留、面板访问等系统项。</p>
+          <div class="form-grid">
+            <label class="check"><input id="cfgLogCleanup" type="checkbox" /> 启用日志自动清理</label>
+            <label>日志保留天数<input id="cfgLogDays" type="number" min="1" /></label>
+            <label>日志最大总量 MB<input id="cfgLogMaxMb" type="number" min="1" /></label>
+            <label class="check"><input id="cfgLocalCredRetainEnabled" type="checkbox" /> 启用本地凭证数量限制（默认关闭）</label>
+            <label>本地最多保留凭证数<input id="cfgLocalCredRetainCount" type="number" min="0" /></label>
+            <label>本地凭证清理间隔（秒）<input id="cfgLocalCredRetainInterval" type="number" min="60" /></label>
+</div>
+          <div class="row actions">
+            <button id="btnSaveSystem" class="btn primary">保存系统设置</button>
+            <button id="btnLogCleanup" class="btn">立即清理日志</button>
+            <button id="btnLocalCredPrune" class="btn">立即清理本地凭证</button>
+          </div>
+          <pre id="systemStatus" class="mono muted"></pre>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="toastStack" class="toast-stack" aria-live="polite" aria-relevant="additions"></div>
   <script src="/static/app.js"></script>
 </body>
 </html>

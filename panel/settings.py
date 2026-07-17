@@ -21,34 +21,42 @@ GOPROXY_POOL_MODES = (
     "free_only",          # free only
 )
 
+GOPROXY_MODE_LABELS = {
+    "mixed_equal": "混合均衡（订阅+免费，不偏科）",
+    "mixed_custom_first": "混合优先订阅源",
+    "mixed_free_first": "混合优先免费源",
+    "custom_only": "仅订阅源",
+    "free_only": "仅免费源",
+}
+
 # Local proxy entrypoints: HTTP x2 + SOCKS5 x2.
 GOPROXY_ENDPOINTS = {
     "http_random": {
-        "label": "HTTP random",
+        "label": "HTTP 随机端口",
         "scheme": "http",
         "port_key": "goproxy_http_random_port",
-        "default_port": 7777,
+        "default_port": 17877,
         "upstream_env": "RANDOM_PORT",
     },
     "http_stable": {
-        "label": "HTTP lowest latency",
+        "label": "HTTP 低延迟端口",
         "scheme": "http",
         "port_key": "goproxy_http_stable_port",
-        "default_port": 7776,
+        "default_port": 17876,
         "upstream_env": "STABLE_PORT",
     },
     "socks5_random": {
-        "label": "SOCKS5 random",
+        "label": "SOCKS5 随机端口",
         "scheme": "socks5",
         "port_key": "goproxy_socks5_random_port",
-        "default_port": 7779,
+        "default_port": 17879,
         "upstream_env": "SOCKS5_RANDOM_PORT",
     },
     "socks5_stable": {
-        "label": "SOCKS5 lowest latency",
+        "label": "SOCKS5 低延迟端口",
         "scheme": "socks5",
         "port_key": "goproxy_socks5_stable_port",
-        "default_port": 7780,
+        "default_port": 17880,
         "upstream_env": "SOCKS5_STABLE_PORT",
     },
 }
@@ -60,7 +68,7 @@ PANEL_DEFAULTS = {
     "panel_host": "127.0.0.1",
     "panel_port": 8787,
     "panel_auto_open": False,
-    "panel_token": "",
+    "panel_token": "",  # deprecated: prefer env GROK_PANEL_PASSWORD + cookie login
     # Embedded GoProxy process
     "goproxy_enabled": True,
     "goproxy_auto_start": True,
@@ -68,11 +76,11 @@ PANEL_DEFAULTS = {
     "goproxy_bin_path": "",  # empty => auto-detect third_party/goproxy/bin/proxygo[.exe]
     "goproxy_data_dir": "data/goproxy",
     "goproxy_workdir": "third_party/goproxy",
-    "goproxy_webui_port": 7778,
-    "goproxy_http_random_port": 7777,
-    "goproxy_http_stable_port": 7776,
-    "goproxy_socks5_random_port": 7779,
-    "goproxy_socks5_stable_port": 7780,
+    "goproxy_webui_port": 17878,
+    "goproxy_http_random_port": 17877,
+    "goproxy_http_stable_port": 17876,
+    "goproxy_socks5_random_port": 17879,
+    "goproxy_socks5_stable_port": 17880,
     "goproxy_webui_password": "goproxy",
     "goproxy_proxy_auth_enabled": False,
     "goproxy_proxy_auth_username": "proxy",
@@ -86,11 +94,9 @@ PANEL_DEFAULTS = {
     # When true, rewrite runtime proxy/cpa_proxy from local endpoint selection (off by default for legacy configs)
     "goproxy_bind_register_proxy": False,
     "goproxy_bind_cpa_proxy": False,
+    # global proxy mode: custom | goproxy
+    "proxy_mode": "custom",
     "goproxy_host": "127.0.0.1",
-    # Browser monitor / zombie guard
-    "browser_monitor_enabled": True,
-    "browser_monitor_interval_sec": 15,
-    "browser_zombie_cleanup_enabled": True,
     # Log auto cleanup
     "log_cleanup_enabled": True,
     "log_dir": "logs",
@@ -103,9 +109,23 @@ PANEL_DEFAULTS = {
     "success_require_live": True,
     # Account-pool auto registration
     "pool_autoreg_enabled": False,
+    "pool_autoreg_source": "remote",
     "pool_autoreg_min_count": 5,
-    "pool_autoreg_batch": 3,
+    "pool_autoreg_target_count": 5,
+    "pool_autoreg_batch": 0,  # 0=一次补满到目标数
     "pool_autoreg_interval_sec": 300,
+    # Remote CPA live patrol
+    "remote_live_enabled": False,
+    "remote_live_interval_sec": 7200,
+    "remote_live_delete_on_fail": True,
+    "remote_live_model": "grok-4.5",
+    "remote_live_max_files": 0,
+    "remote_live_batch": 6,
+    "remote_live_proxy": "",
+    # Local credential retain limit (default off)
+    "local_cred_retain_enabled": False,
+    "local_cred_retain_count": 100,
+    "local_cred_retain_interval_sec": 600,
 }
 
 
@@ -292,11 +312,11 @@ def normalize_branch_config(cfg):
     )
     out["goproxy_host"] = _as_str(out.get("goproxy_host"), "127.0.0.1").strip() or "127.0.0.1"
     for key, default in (
-        ("goproxy_webui_port", 7778),
-        ("goproxy_http_random_port", 7777),
-        ("goproxy_http_stable_port", 7776),
-        ("goproxy_socks5_random_port", 7779),
-        ("goproxy_socks5_stable_port", 7780),
+        ("goproxy_webui_port", 17878),
+        ("goproxy_http_random_port", 17877),
+        ("goproxy_http_stable_port", 17876),
+        ("goproxy_socks5_random_port", 17879),
+        ("goproxy_socks5_stable_port", 17880),
     ):
         out[key] = _as_int(out.get(key), default, minimum=1, maximum=65535)
     out["goproxy_webui_password"] = _as_str(out.get("goproxy_webui_password"), "goproxy")
@@ -309,10 +329,21 @@ def normalize_branch_config(cfg):
     out["goproxy_endpoint"] = normalize_endpoint(out.get("goproxy_endpoint"))
     out["goproxy_bind_register_proxy"] = _as_bool(out.get("goproxy_bind_register_proxy"), False)
     out["goproxy_bind_cpa_proxy"] = _as_bool(out.get("goproxy_bind_cpa_proxy"), False)
-
-    out["browser_monitor_enabled"] = _as_bool(out.get("browser_monitor_enabled"), True)
-    out["browser_monitor_interval_sec"] = _as_int(out.get("browser_monitor_interval_sec"), 15, minimum=3)
-    out["browser_zombie_cleanup_enabled"] = _as_bool(out.get("browser_zombie_cleanup_enabled"), True)
+    mode = _as_str(out.get("proxy_mode"), "custom").strip().lower().replace("-", "_")
+    if mode in {"goproxy", "local_goproxy", "local", "embedded"}:
+        mode = "goproxy"
+    else:
+        mode = "custom"
+    # derive from legacy bind flags if mode not explicitly useful
+    if mode == "custom" and (out.get("goproxy_bind_register_proxy") or out.get("goproxy_bind_cpa_proxy")):
+        mode = "goproxy"
+    out["proxy_mode"] = mode
+    if mode == "goproxy":
+        out["goproxy_bind_register_proxy"] = True
+        out["goproxy_bind_cpa_proxy"] = True
+    else:
+        out["goproxy_bind_register_proxy"] = False
+        out["goproxy_bind_cpa_proxy"] = False
 
     out["log_cleanup_enabled"] = _as_bool(out.get("log_cleanup_enabled"), True)
     out["log_dir"] = _as_str(out.get("log_dir"), "logs").strip() or "logs"
@@ -323,9 +354,26 @@ def normalize_branch_config(cfg):
     out["live_inspect_enabled"] = _as_bool(out.get("live_inspect_enabled"), True)
     out["success_require_live"] = _as_bool(out.get("success_require_live"), True)
     out["pool_autoreg_enabled"] = _as_bool(out.get("pool_autoreg_enabled"), False)
+    raw_src = _as_str(out.get("pool_autoreg_source"), "remote").strip().lower().replace("-", "_")
+    if raw_src not in {"remote", "local", "remote_then_local"}:
+        raw_src = "remote"
+    out["pool_autoreg_source"] = raw_src
     out["pool_autoreg_min_count"] = _as_int(out.get("pool_autoreg_min_count"), 5, minimum=0)
-    out["pool_autoreg_batch"] = _as_int(out.get("pool_autoreg_batch"), 3, minimum=1)
+    # 终点默认=触发线；若配置更小则抬到触发线
+    _target = _as_int(out.get("pool_autoreg_target_count"), out["pool_autoreg_min_count"], minimum=0)
+    out["pool_autoreg_target_count"] = max(_target, out["pool_autoreg_min_count"])
+    out["pool_autoreg_batch"] = 0  # always fill full deficit; multi-thread via concurrent_count
     out["pool_autoreg_interval_sec"] = _as_int(out.get("pool_autoreg_interval_sec"), 300, minimum=30)
+    out["remote_live_enabled"] = _as_bool(out.get("remote_live_enabled"), False)
+    out["remote_live_interval_sec"] = _as_int(out.get("remote_live_interval_sec"), 7200, minimum=60)
+    out["remote_live_delete_on_fail"] = _as_bool(out.get("remote_live_delete_on_fail"), True)
+    out["remote_live_model"] = _as_str(out.get("remote_live_model"), "grok-4.5").strip() or "grok-4.5"
+    out["remote_live_max_files"] = _as_int(out.get("remote_live_max_files"), 0, minimum=0)
+    out["remote_live_batch"] = _as_int(out.get("remote_live_batch"), 6, minimum=1, maximum=32)
+    out["remote_live_proxy"] = _as_str(out.get("remote_live_proxy"), "")
+    out["local_cred_retain_enabled"] = _as_bool(out.get("local_cred_retain_enabled"), False)
+    out["local_cred_retain_count"] = _as_int(out.get("local_cred_retain_count"), 100, minimum=0)
+    out["local_cred_retain_interval_sec"] = _as_int(out.get("local_cred_retain_interval_sec"), 600, minimum=60)
 
     return out
 
@@ -360,6 +408,7 @@ def describe_proxy_selection(cfg):
         "endpoint": endpoint,
         "endpoint_label": GOPROXY_ENDPOINTS[endpoint]["label"],
         "pool_mode": mode,
+        "mode_label": GOPROXY_MODE_LABELS.get(mode, mode),
         "proxy_url": resolve_local_proxy_url(cfg, endpoint),
         "ports": {
             "http_random": _as_int(cfg.get("goproxy_http_random_port"), 7777, minimum=1, maximum=65535),

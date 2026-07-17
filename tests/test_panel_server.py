@@ -29,7 +29,6 @@ class PanelServerTests(unittest.TestCase):
         with urlopen("http://127.0.0.1:18787/api/overview", timeout=5) as r:
             ov = json.loads(r.read().decode("utf-8"))
         self.assertTrue(ov.get("ok"))
-        self.assertIn("browsers", ov)
         self.assertIn("goproxy", ov)
         self.assertIn("ts", ov)
 

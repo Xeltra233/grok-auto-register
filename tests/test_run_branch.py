@@ -30,7 +30,6 @@ class RunBranchEntryTests(unittest.TestCase):
         with patch.object(run_branch, "_load_cfg", return_value=cfg), \
              patch("panel.settings.describe_proxy_selection", return_value={"endpoint": "http_random"}), \
              patch("panel.credentials.list_credentials", return_value={"counts": {"uploaded": 0, "pending": 0}}), \
-             patch("panel.browser_monitor.summary", return_value={"registered": 0, "zombies": 0}), \
              patch("panel.pool_autoreg.pool_counts", return_value={"total": 0, "uploaded": 0, "pending": 0}), \
              patch("panel.pool_autoreg.status", return_value={"running": False}):
             code = run_branch.cmd_status(None)

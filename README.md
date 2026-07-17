@@ -443,7 +443,7 @@ python -m unittest discover -s tests -p "test_*.py"
 重点分支测试：
 
 ```bash
-python -m unittest tests.test_run_branch tests.test_panel_server tests.test_goproxy_manager tests.test_pool_autoreg tests.test_browser_monitor_and_logs -v
+python -m unittest tests.test_run_branch tests.test_panel_server tests.test_goproxy_manager tests.test_pool_autoreg tests.test_browser_lifecycle tests.test_browser_monitor_and_logs -v
 ```
 
 ## License

@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="login-page">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>登录 · Grok Auto Panel</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body class="login-body">
+  <div class="bg-orb orb-a"></div>
+  <div class="bg-orb orb-b"></div>
+  <div class="login-card glass">
+    <div class="brand">
+      <div class="logo">G</div>
+      <div>
+        <div class="title">Grok Auto Panel</div>
+        <div class="subtitle">独立登录页 · Cookie 会话</div>
+      </div>
+    </div>
+    <p class="muted login-tip" id="loginTip">正在检查登录状态…</p>
+    <label class="login-label">面板密码
+      <input id="passwordInput" type="password" placeholder="密码来自环境变量 GROK_PANEL_PASSWORD" autocomplete="current-password" />
+    </label>
+    <div class="row">
+      <button id="btnLogin" class="btn primary">登录进入</button>
+    </div>
+    <p class="muted tiny">
+      密码只从环境变量读取（优先 <code>GROK_PANEL_PASSWORD</code> / <code>PANEL_PASSWORD</code>）。
+      登录成功后写入 HttpOnly Cookie。
+    </p>
+    <div id="loginError" class="login-error hidden"></div>
+  </div>
+  <script src="/static/login.js"></script>
+</body>
+</html>

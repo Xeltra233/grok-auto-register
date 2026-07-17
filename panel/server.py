@@ -4,35 +4,53 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
+import secrets
 import time
 import json
 import mimetypes
 import os
 import threading
 import traceback
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 from urllib.parse import parse_qs, urlparse
 
-from panel.browser_monitor import cleanup_zombies, start_monitor_loop, stop_monitor_loop, summary as browser_summary
 from panel.credentials import (
     build_credentials_zip,
     delete_all_uploaded,
     delete_credentials,
     list_credentials,
+    prune_local_credentials,
 )
 from panel.goproxy_manager import get_manager
 from panel.log_cleanup import cleanup_logs, loop_status as log_cleanup_status, start_log_cleanup_loop, stop_log_cleanup_loop
+from panel.local_cred_retain import (
+    run_once as local_cred_retain_once,
+    start_local_cred_retain_loop,
+    status as local_cred_retain_status,
+    stop_local_cred_retain_loop,
+)
+from panel.remote_live import (
+    run_remote_live_patrol as remote_live_tick,
+    start_remote_live_loop,
+    status as remote_live_status,
+    stop_remote_live_loop,
+)
 from panel.pool_autoreg import (
     evaluate_and_maybe_trigger as pool_autoreg_tick,
     pool_counts,
+    start_manual_registration,
     start_pool_autoreg_loop,
     status as pool_autoreg_status,
     stop_pool_autoreg_loop,
 )
 from panel.settings import (
     GOPROXY_ENDPOINTS,
+    GOPROXY_MODE_LABELS,
     GOPROXY_POOL_MODES,
     apply_local_proxy_bindings,
     describe_proxy_selection,
@@ -85,7 +103,6 @@ class PanelState:
         self.config = _load_config()
         self.manager = get_manager(self.config, root=str(self.root))
         self.last_log_cleanup = None
-        self.last_browser_cleanup = None
         self._lock = threading.RLock()
 
     def reload(self):
@@ -120,15 +137,96 @@ def _read_json(handler: BaseHTTPRequestHandler) -> dict:
         return {}
 
 
+PANEL_COOKIE_NAME = "grok_panel_session"
+PANEL_PASSWORD_ENVS = (
+    "GROK_PANEL_PASSWORD",
+    "PANEL_PASSWORD",
+    "PANEL_TOKEN",
+    "GROK_PANEL_TOKEN",
+)
+
+
+def _panel_password() -> str:
+    """Password from environment first; fallback to config panel_token for compatibility."""
+    for key in PANEL_PASSWORD_ENVS:
+        val = str(os.environ.get(key) or "").strip()
+        if val:
+            return val
+    return str(STATE.config.get("panel_token") or "").strip()
+
+
+def _auth_required() -> bool:
+    return bool(_panel_password())
+
+
+def _session_secret() -> str:
+    # derive stable-ish secret from password so restarts keep cookies valid for same password
+    pwd = _panel_password() or "dev"
+    return hashlib.sha256(("grok-panel-session|" + pwd).encode("utf-8")).hexdigest()
+
+
+def _make_session_value(password: str) -> str:
+    raw = hmac.new(_session_secret().encode("utf-8"), password.encode("utf-8"), hashlib.sha256).hexdigest()
+    return raw
+
+
+def _expected_session() -> str:
+    pwd = _panel_password()
+    if not pwd:
+        return ""
+    return _make_session_value(pwd)
+
+
+def _parse_cookies(handler: BaseHTTPRequestHandler) -> dict:
+    raw = handler.headers.get("Cookie") or ""
+    jar = SimpleCookie()
+    try:
+        jar.load(raw)
+    except Exception:
+        return {}
+    out = {}
+    for k, morsel in jar.items():
+        out[k] = morsel.value
+    return out
+
+
 def _check_token(handler: BaseHTTPRequestHandler) -> bool:
-    token = str(STATE.config.get("panel_token") or "").strip()
-    if not token:
+    """Authenticate via HttpOnly cookie (preferred), header/query fallback."""
+    if not _auth_required():
         return True
+    expected = _expected_session()
+    cookies = _parse_cookies(handler)
+    got_cookie = str(cookies.get(PANEL_COOKIE_NAME) or "").strip()
+    if got_cookie and hmac.compare_digest(got_cookie, expected):
+        return True
+    # backward compatible fallbacks
     got = handler.headers.get("X-Panel-Token") or ""
     q = parse_qs(urlparse(handler.path).query)
     if not got:
         got = (q.get("token") or [""])[0]
-    return got == token
+    pwd = _panel_password()
+    if got and pwd and hmac.compare_digest(str(got).strip(), pwd):
+        return True
+    # also accept old style where client stored password as session equal value
+    if got and expected and hmac.compare_digest(str(got).strip(), expected):
+        return True
+    return False
+
+
+def _set_auth_cookie(handler: BaseHTTPRequestHandler, value: str, *, clear: bool = False):
+    # host-only cookie for local panel
+    max_age = 0 if clear else 60 * 60 * 24 * 14  # 14 days
+    parts = [
+        f"{PANEL_COOKIE_NAME}={value if not clear else ''}",
+        "Path=/",
+        "HttpOnly",
+        "SameSite=Lax",
+    ]
+    if clear:
+        parts.append("Max-Age=0")
+    else:
+        parts.append(f"Max-Age={max_age}")
+    handler.send_header("Set-Cookie", "; ".join(parts))
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -144,14 +242,85 @@ class PanelHandler(BaseHTTPRequestHandler):
     def _unauthorized(self):
         _json_response(self, 401, {"ok": False, "error": "unauthorized"})
 
+    def _api_login(self, body: dict):
+        if not _auth_required():
+            # no password configured: always ok, clear any cookie
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            _set_auth_cookie(self, "", clear=True)
+            raw = json.dumps({"ok": True, "authenticated": True, "auth_required": False}, ensure_ascii=False).encode("utf-8")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+            return
+        password = str((body or {}).get("password") or (body or {}).get("token") or "").strip()
+        expected = _panel_password()
+        if not password or not hmac.compare_digest(password, expected):
+            return _json_response(self, 401, {"ok": False, "error": "密码错误"})
+        session = _make_session_value(expected)
+        payload = {"ok": True, "authenticated": True, "auth_required": True, "auth_mode": "cookie"}
+        raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        _set_auth_cookie(self, session, clear=False)
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def _api_logout(self):
+        payload = {"ok": True, "authenticated": False}
+        raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        _set_auth_cookie(self, "", clear=True)
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
-        if path in ("/", "/index.html"):
-            return self._serve_static("index.html")
+        # static assets always public (login page needs css/js)
         if path.startswith("/static/"):
             return self._serve_static(path[len("/static/") :])
+        if path in ("/login", "/login.html"):
+            # already logged in -> home
+            if _check_token(self):
+                self.send_response(302)
+                self.send_header("Location", "/")
+                self.end_headers()
+                return
+            return self._serve_static("login.html")
+        if path in ("/", "/index.html"):
+            if _auth_required() and not _check_token(self):
+                self.send_response(302)
+                self.send_header("Location", "/login")
+                self.end_headers()
+                return
+            return self._serve_static("index.html")
         if path.startswith("/api/"):
+            # public endpoints for login page
+            if path == "/api/auth/status":
+                required = _auth_required()
+                return _json_response(
+                    self,
+                    200,
+                    {
+                        "ok": True,
+                        "auth_required": required,
+                        "token_required": required,  # backward compatible
+                        "authenticated": (not required) or _check_token(self),
+                        "auth_mode": "cookie",
+                        "password_env": "GROK_PANEL_PASSWORD",
+                    },
+                )
+            if path == "/api/auth/check":
+                if not _check_token(self):
+                    return self._unauthorized()
+                return _json_response(self, 200, {"ok": True, "authenticated": True})
             if not _check_token(self):
                 return self._unauthorized()
             if path == "/api/stream":
@@ -165,9 +334,14 @@ class PanelHandler(BaseHTTPRequestHandler):
         if not path.startswith("/api/"):
             _json_response(self, 404, {"ok": False, "error": "not found"})
             return
+        body = _read_json(self)
+        # public auth endpoints
+        if path == "/api/auth/login":
+            return self._api_login(body)
+        if path == "/api/auth/logout":
+            return self._api_logout()
         if not _check_token(self):
             return self._unauthorized()
-        body = _read_json(self)
         try:
             self._api_post(path, body)
         except Exception as exc:
@@ -180,38 +354,90 @@ class PanelHandler(BaseHTTPRequestHandler):
     def _overview_payload(self) -> dict:
         cfg = STATE.reload()
         g = STATE.manager.status()
-        b = browser_summary(project_root=str(STATE.root))
         creds = list_credentials(cfg, buckets=("uploaded", "pending"), root=STATE.root)
         return {
             "ok": True,
             "ts": time.time(),
             "proxy": describe_proxy_selection(cfg),
             "goproxy": g,
-            "browsers": b,
             "credentials": {
                 "counts": creds.get("counts"),
                 "total": creds.get("total"),
             },
             "log_cleanup": STATE.last_log_cleanup,
             "log_cleanup_loop": log_cleanup_status(),
-            "browser_cleanup": STATE.last_browser_cleanup,
             "pool": pool_counts(cfg, root=str(STATE.root)),
             "pool_autoreg": pool_autoreg_status(),
+            "remote_live": remote_live_status(),
+            "local_cred_retain": local_cred_retain_status(),
             "config": {
                 "panel_host": cfg.get("panel_host"),
                 "panel_port": cfg.get("panel_port"),
+                "proxy": cfg.get("proxy"),
+                "email_provider": cfg.get("email_provider"),
+                "register_count": cfg.get("register_count"),
+                "concurrent_count": cfg.get("concurrent_count"),
+                "enable_nsfw": cfg.get("enable_nsfw"),
+                "browser_restart_every": cfg.get("browser_restart_every"),
+                "log_level": cfg.get("log_level"),
+                "duckmail_api_key": cfg.get("duckmail_api_key"),
+                "freemail_api_base": cfg.get("freemail_api_base"),
+                "freemail_jwt_token": cfg.get("freemail_jwt_token"),
+                "freemail_domain": cfg.get("freemail_domain"),
+                "icloud_hme_api_base": cfg.get("icloud_hme_api_base"),
+                "icloud_hme_account_id": cfg.get("icloud_hme_account_id"),
+                "icloud_hme_label": cfg.get("icloud_hme_label"),
+                "cloudflare_api_base": cfg.get("cloudflare_api_base"),
+                "cloudflare_api_key": cfg.get("cloudflare_api_key"),
+                "cloudflare_auth_mode": cfg.get("cloudflare_auth_mode"),
+                "cpa_export_enabled": cfg.get("cpa_export_enabled"),
+                "cpa_mint_async": cfg.get("cpa_mint_async"),
+                "cpa_proxy": cfg.get("cpa_proxy"),
+                "cpa_remote_enabled": cfg.get("cpa_remote_enabled"),
+                "cpa_remote_base": cfg.get("cpa_remote_base"),
+                "cpa_remote_management_key": cfg.get("cpa_remote_management_key"),
                 "goproxy_pool_mode": cfg.get("goproxy_pool_mode"),
                 "goproxy_endpoint": cfg.get("goproxy_endpoint"),
                 "goproxy_bind_register_proxy": cfg.get("goproxy_bind_register_proxy"),
+                "goproxy_bind_cpa_proxy": cfg.get("goproxy_bind_cpa_proxy"),
+                "proxy_mode": cfg.get("proxy_mode", "custom"),
+                "goproxy_enabled": cfg.get("goproxy_enabled"),
+                "goproxy_auto_start": cfg.get("goproxy_auto_start"),
+                "goproxy_webui_password": cfg.get("goproxy_webui_password"),
                 "live_inspect_enabled": cfg.get("live_inspect_enabled", True),
                 "success_require_live": cfg.get("success_require_live", True),
                 "pool_autoreg_enabled": cfg.get("pool_autoreg_enabled", False),
+                "pool_autoreg_source": cfg.get("pool_autoreg_source", "remote"),
                 "pool_autoreg_min_count": cfg.get("pool_autoreg_min_count", 5),
+                "pool_autoreg_target_count": cfg.get("pool_autoreg_target_count", cfg.get("pool_autoreg_min_count", 5)),
                 "pool_autoreg_batch": cfg.get("pool_autoreg_batch", 3),
                 "pool_autoreg_interval_sec": cfg.get("pool_autoreg_interval_sec", 300),
+                "remote_live_enabled": cfg.get("remote_live_enabled", False),
+                "remote_live_interval_sec": cfg.get("remote_live_interval_sec", 7200),
+                "remote_live_delete_on_fail": cfg.get("remote_live_delete_on_fail", True),
+                "remote_live_model": cfg.get("remote_live_model", "grok-4.5"),
+                "remote_live_max_files": cfg.get("remote_live_max_files", 0),
+                "remote_live_batch": cfg.get("remote_live_batch", 6),
+                "remote_live_proxy": cfg.get("remote_live_proxy", ""),
+                "log_cleanup_enabled": cfg.get("log_cleanup_enabled", True),
+                "log_retain_days": cfg.get("log_retain_days"),
+                "local_cred_retain_enabled": cfg.get("local_cred_retain_enabled", False),
+                "local_cred_retain_count": cfg.get("local_cred_retain_count", 100),
+                "local_cred_retain_interval_sec": cfg.get("local_cred_retain_interval_sec", 600),
+                "log_max_total_mb": cfg.get("log_max_total_mb"),
             },
-            "modes": list(GOPROXY_POOL_MODES),
-            "endpoints": list(GOPROXY_ENDPOINTS.keys()),
+            "modes": [
+                {"id": m, "label": GOPROXY_MODE_LABELS.get(m, m)} for m in GOPROXY_POOL_MODES
+            ],
+            "endpoints": [
+                {
+                    "id": k,
+                    "label": v.get("label", k),
+                    "scheme": v.get("scheme"),
+                    "port": cfg.get(v.get("port_key"), v.get("default_port")),
+                }
+                for k, v in GOPROXY_ENDPOINTS.items()
+            ],
         }
 
     def _sse_stream(self):
@@ -263,8 +489,22 @@ class PanelHandler(BaseHTTPRequestHandler):
             return _json_response(self, 200, {"ok": True, "service": "panel"})
         if path == "/api/overview":
             return _json_response(self, 200, self._overview_payload())
-        if path == "/api/browsers":
-            return _json_response(self, 200, browser_summary(project_root=str(STATE.root)))
+        if path == "/api/config":
+            # return editable subset used by panel settings form
+            keys = [
+                "proxy","proxy_mode","email_provider","register_count","concurrent_count","enable_nsfw","browser_restart_every","log_level",
+                "duckmail_api_key","freemail_api_base","freemail_jwt_token","freemail_domain",
+                "icloud_hme_api_base","icloud_hme_account_id","icloud_hme_label",
+                "cloudflare_api_base","cloudflare_api_key","cloudflare_auth_mode",
+                "cpa_export_enabled","cpa_mint_async","cpa_proxy","cpa_remote_enabled","cpa_remote_base","cpa_remote_management_key",
+                "goproxy_enabled","goproxy_auto_start","goproxy_pool_mode","goproxy_endpoint","goproxy_bind_register_proxy","goproxy_bind_cpa_proxy","goproxy_webui_password",
+                "live_inspect_enabled","success_require_live",
+                "pool_autoreg_enabled","pool_autoreg_source","pool_autoreg_min_count","pool_autoreg_target_count","pool_autoreg_batch","pool_autoreg_interval_sec","remote_live_enabled","remote_live_interval_sec","remote_live_delete_on_fail","remote_live_model","remote_live_max_files","remote_live_batch","remote_live_proxy",
+                "log_cleanup_enabled","log_retain_days","log_max_total_mb","local_cred_retain_enabled","local_cred_retain_count","local_cred_retain_interval_sec","panel_token",
+            ]
+            data = {k: cfg.get(k) for k in keys}
+            return _json_response(self, 200, {"ok": True, "config": data})
+
         if path == "/api/pool":
             counts = pool_counts(cfg, root=str(STATE.root))
             return _json_response(self, 200, {"ok": True, "counts": counts, "autoreg": pool_autoreg_status()})
@@ -308,18 +548,23 @@ class PanelHandler(BaseHTTPRequestHandler):
 
     def _api_post(self, path: str, body: dict):
         cfg = STATE.reload()
-        if path == "/api/pool/check":
-            res = pool_autoreg_tick(cfg, root=str(STATE.root), force=bool(body.get("force", False)))
+        if path == "/api/remote-live/check":
+            res = remote_live_tick(cfg, root=str(STATE.root), force=bool(body.get("force", True)), trigger_autoreg=bool(body.get("trigger_autoreg", True)))
             return _json_response(self, 200, res)
-        if path == "/api/browsers/cleanup":
-            res = cleanup_zombies(project_root=str(STATE.root), kill=bool(body.get("kill", True)))
-            STATE.last_browser_cleanup = {
-                "ts": time.time(),
-                "killed_count": res.get("killed_count"),
-                "before_zombies": res.get("before_zombies"),
-                "after_zombies": res.get("after_zombies"),
-                "ok": res.get("ok"),
-            }
+        if path == "/api/register/start":
+            # 手动注册：按 register_count 启动，与账号池补货分离
+            count = body.get("count", body.get("register_count"))
+            res = start_manual_registration(cfg, count=count)
+            return _json_response(self, 200, res)
+        if path == "/api/pool/check":
+            # 默认只检查；refill/force 才触发补到目标数
+            force = bool(body.get("force", False) or body.get("refill", False))
+            res = pool_autoreg_tick(cfg, root=str(STATE.root), force=force)
+            res["mode"] = "pool_refill" if force else "pool_check"
+            return _json_response(self, 200, res)
+        if path == "/api/pool/refill":
+            res = pool_autoreg_tick(cfg, root=str(STATE.root), force=True)
+            res["mode"] = "pool_refill"
             return _json_response(self, 200, res)
         if path == "/api/goproxy/start":
             return _json_response(self, 200, STATE.manager.start(build_if_missing=bool(body.get("build", True))))
@@ -357,6 +602,14 @@ class PanelHandler(BaseHTTPRequestHandler):
             )
             STATE.last_log_cleanup = res
             return _json_response(self, 200, res)
+        if path == "/api/credentials/prune":
+            res = prune_local_credentials(
+                cfg,
+                root=STATE.root,
+                keep=body.get("keep"),
+                enabled=True if body.get("force") else None,
+            )
+            return _json_response(self, 200, res)
         if path == "/api/credentials/delete":
             if body.get("all"):
                 res = delete_all_uploaded(cfg, root=STATE.root)
@@ -392,24 +645,65 @@ class PanelHandler(BaseHTTPRequestHandler):
         if path == "/api/config":
             # shallow update selected keys only
             allowed = {
+                # proxy / goproxy
+                "proxy",
                 "goproxy_pool_mode",
                 "goproxy_endpoint",
                 "goproxy_bind_register_proxy",
                 "goproxy_bind_cpa_proxy",
+                "proxy_mode",
                 "goproxy_enabled",
                 "goproxy_auto_start",
+                "goproxy_webui_password",
+                # register core
+                "email_provider",
+                "register_count",
+                "concurrent_count",
+                "enable_nsfw",
+                "browser_restart_every",
+                "log_level",
+                # mail providers
+                "duckmail_api_key",
+                "freemail_api_base",
+                "freemail_jwt_token",
+                "freemail_domain",
+                "icloud_hme_api_base",
+                "icloud_hme_account_id",
+                "icloud_hme_label",
+                "cloudflare_api_base",
+                "cloudflare_api_key",
+                "cloudflare_auth_mode",
+                # cpa / live / pool
+                "cpa_export_enabled",
+                "cpa_mint_async",
+                "cpa_proxy",
+                "cpa_remote_enabled",
+                "cpa_remote_base",
+                "cpa_remote_management_key",
                 "live_inspect_enabled",
                 "success_require_live",
+                "pool_autoreg_enabled",
+                "pool_autoreg_min_count",
+                "pool_autoreg_target_count",
+                "pool_autoreg_batch",
+                "pool_autoreg_interval_sec",
+                # logs / panel
+                "log_cleanup_enabled",
                 "log_retain_days",
                 "log_max_total_mb",
-                "panel_token",
             }
             for k, v in body.items():
                 if k in allowed:
                     cfg[k] = v
             cfg = normalize_branch_config(cfg)
-            if cfg.get("goproxy_bind_register_proxy"):
+            # proxy_mode is the single global switch
+            if str(cfg.get("proxy_mode") or "custom").lower() == "goproxy":
+                cfg["goproxy_bind_register_proxy"] = True
+                cfg["goproxy_bind_cpa_proxy"] = True
                 cfg = apply_local_proxy_bindings(cfg)
+            else:
+                cfg["goproxy_bind_register_proxy"] = False
+                cfg["goproxy_bind_cpa_proxy"] = False
             _save_config(cfg)
             STATE.reload()
             return _json_response(self, 200, {"ok": True, "config": STATE.config})
@@ -421,23 +715,21 @@ class PanelServer:
         self,
         host: str = "127.0.0.1",
         port: int = 8787,
-        start_browser_monitor: bool = True,
         start_log_cleanup: bool = True,
         start_pool_autoreg: bool = True,
     ):
         self.host = host
         self.port = int(port)
-        self.start_browser_monitor = bool(start_browser_monitor)
         self.start_log_cleanup = bool(start_log_cleanup)
         self.start_pool_autoreg = bool(start_pool_autoreg)
         self._httpd: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
 
-    def _maybe_start_browser_monitor(self):
-        if not self.start_browser_monitor:
+    def _maybe_start_local_cred_retain(self):
+        if not getattr(self, "start_local_cred_retain", True):
             return
         cfg = STATE.config or {}
-        if not bool(cfg.get("browser_monitor_enabled", True)):
+        if not bool(cfg.get("local_cred_retain_enabled", False)):
             return
 
         def _cfg_provider():
@@ -446,12 +738,12 @@ class PanelServer:
             out["_project_root"] = str(STATE.root)
             return out
 
-        start_monitor_loop(
+        start_local_cred_retain_loop(
             project_root=str(STATE.root),
-            interval_sec=float(cfg.get("browser_monitor_interval_sec") or 15),
+            interval_sec=float(cfg.get("local_cred_retain_interval_sec") or 600),
             enabled=True,
-            cleanup_enabled=bool(cfg.get("browser_zombie_cleanup_enabled", True)),
             config_provider=_cfg_provider,
+            run_immediately=True,
         )
 
     def _maybe_start_log_cleanup(self):
@@ -477,6 +769,27 @@ class PanelServer:
             config_provider=_cfg_provider,
             on_result=_on_result,
             run_immediately=True,
+        )
+
+    def _maybe_start_remote_live(self):
+        if not self.start_remote_live:
+            return
+        cfg = STATE.config or {}
+        if not bool(cfg.get("remote_live_enabled", False)):
+            return
+
+        def _cfg_provider():
+            current = STATE.reload()
+            out = dict(current)
+            out["_project_root"] = str(STATE.root)
+            return out
+
+        start_remote_live_loop(
+            project_root=str(STATE.root),
+            interval_sec=float(cfg.get("remote_live_interval_sec") or 7200),
+            enabled=True,
+            config_provider=_cfg_provider,
+            run_immediately=False,
         )
 
     def _maybe_start_pool_autoreg(self):
@@ -509,11 +822,15 @@ class PanelServer:
         self._thread = threading.Thread(target=self._httpd.serve_forever, name="panel-http", daemon=True)
         self._thread.start()
         try:
-            self._maybe_start_browser_monitor()
+            self._maybe_start_log_cleanup()
         except Exception:
             pass
         try:
-            self._maybe_start_log_cleanup()
+            self._maybe_start_local_cred_retain()
+        except Exception:
+            pass
+        try:
+            self._maybe_start_remote_live()
         except Exception:
             pass
         try:
@@ -525,11 +842,15 @@ class PanelServer:
         if self._httpd is None:
             return
         try:
-            stop_monitor_loop()
+            stop_log_cleanup_loop()
         except Exception:
             pass
         try:
-            stop_log_cleanup_loop()
+            stop_local_cred_retain_loop()
+        except Exception:
+            pass
+        try:
+            stop_remote_live_loop()
         except Exception:
             pass
         try:
