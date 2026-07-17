@@ -34,6 +34,8 @@ const state = {
   pollTimer: null,
   es: null,
   activeTab: localStorage.getItem("grok_panel_tab") || "overview",
+  formsHydrated: false,
+  formsDirty: false,
 };
 
 const toastState = { seq: 0, items: [] };
@@ -279,7 +281,40 @@ function selectedNames(uploadedOnly = false) {
   });
   return names;
 }
-function applyConfigForms(cfg = {}) {
+function markFormsDirty() {
+  state.formsDirty = true;
+}
+
+function wireConfigFormDirtyTracking() {
+  const ids = [
+    "cfgEmailProvider", "cfgConcurrent", "cfgBrowserRestart", "cfgLogLevel", "cfgEnableNsfw",
+    "cfgDuckmailKey", "cfgFreemailBase", "cfgFreemailJwt", "cfgFreemailDomain",
+    "cfgIcloudBase", "cfgIcloudAccount", "cfgIcloudLabel",
+    "cfgCfBase", "cfgCfKey", "cfgCfMode",
+    "cfgLiveInspect", "cfgSuccessRequireLive", "cfgCpaExport", "cfgCpaMintAsync", "cfgCpaProxy",
+    "cfgCpaRemoteEnabled", "cfgCpaRemoteBase", "cfgCpaRemoteKey",
+    "cfgPoolEnabled", "cfgPoolSource", "cfgPoolMin", "cfgPoolTarget", "cfgPoolInterval",
+    "cfgProxyMode", "cfgProxy",
+    "cfgRemoteLiveEnabled", "cfgRemoteLiveDelete", "cfgRemoteLiveInterval", "cfgRemoteLiveBatch",
+    "cfgRemoteLiveModel", "cfgRemoteLiveMax",
+    "cfgLogCleanup", "cfgLogDays", "cfgLogMaxMb",
+    "cfgLocalCredRetainEnabled", "cfgLocalCredRetainCount", "cfgLocalCredRetainInterval",
+    "poolMode", "endpoint", "bindProxy",
+  ];
+  ids.forEach((id) => {
+    const el = $(id);
+    if (!el || el.dataset.dirtyWired === "1") return;
+    el.dataset.dirtyWired = "1";
+    const evt = (el.tagName === "SELECT" || el.type === "checkbox" || el.type === "radio") ? "change" : "input";
+    el.addEventListener(evt, markFormsDirty);
+  });
+}
+
+function applyConfigForms(cfg = {}, opts = {}) {
+  const force = !!(opts && opts.force);
+  // SSE/poll must not clobber in-progress edits (e.g. email provider dropdown).
+  if (state.formsDirty && !force) return;
+  if (state.formsHydrated && !force) return;
   setValue("cfgEmailProvider", cfg.email_provider || "duckmail");
   setValue("cfgConcurrent", cfg.concurrent_count ?? 1);
   setValue("cfgBrowserRestart", cfg.browser_restart_every ?? 10);
@@ -322,6 +357,8 @@ function applyConfigForms(cfg = {}) {
   setChecked("cfgLocalCredRetainEnabled", cfg.local_cred_retain_enabled);
   setValue("cfgLocalCredRetainCount", cfg.local_cred_retain_count ?? 100);
   setValue("cfgLocalCredRetainInterval", cfg.local_cred_retain_interval_sec ?? 600);
+  state.formsHydrated = true;
+  if (force) state.formsDirty = false;
 }
 function collectRegisterConfig() {
   return {
@@ -377,7 +414,7 @@ function collectSystemConfig() {
     local_cred_retain_interval_sec: Number(($("cfgLocalCredRetainInterval") && $("cfgLocalCredRetainInterval").value) || 600),
   };
 }
-function applyOverview(data) {
+function applyOverview(data, opts = {}) {
   state.overview = data;
   setLastSync(data.ts || Date.now() / 1000);
   $("mProxy").textContent = data.goproxy?.running ? "运行中" : "未运行";
@@ -397,8 +434,13 @@ function applyOverview(data) {
     日志清理: data.log_cleanup,
     ts: data.ts,
   }, null, 2);
-  fillSelect($("poolMode"), data.modes || Object.entries(MODE_LABELS).map(([id, label]) => ({ id, label })), data.config?.goproxy_pool_mode, (id) => MODE_LABELS[id] || id);
-  fillSelect($("endpoint"), data.endpoints || Object.entries(ENDPOINT_LABELS).map(([id, label]) => ({ id, label })), data.config?.goproxy_endpoint, (id) => ENDPOINT_LABELS[id] || id);
+  const forceSelects = !!(opts && opts.forceForms) || !state.formsDirty;
+  if (forceSelects && document.activeElement !== $("poolMode")) {
+    fillSelect($("poolMode"), data.modes || Object.entries(MODE_LABELS).map(([id, label]) => ({ id, label })), data.config?.goproxy_pool_mode, (id) => MODE_LABELS[id] || id);
+  }
+  if (forceSelects && document.activeElement !== $("endpoint")) {
+    fillSelect($("endpoint"), data.endpoints || Object.entries(ENDPOINT_LABELS).map(([id, label]) => ({ id, label })), data.config?.goproxy_endpoint, (id) => ENDPOINT_LABELS[id] || id);
+  }
   if ($("bindProxy") && document.activeElement !== $("bindProxy")) $("bindProxy").checked = !!data.config?.goproxy_bind_register_proxy;
   if ($("proxyModeHint")) {
     const mode = data.config?.proxy_mode || (data.config?.goproxy_bind_register_proxy ? "goproxy" : "custom");
@@ -415,7 +457,7 @@ function applyOverview(data) {
     管理页: `http://127.0.0.1:${data.goproxy?.ports?.webui || data.proxy?.ports?.webui || 17878}/`,
     默认密码: "goproxy",
   }, null, 2);
-  applyConfigForms(data.config || {});
+  applyConfigForms(data.config || {}, { force: !!(opts && opts.forceForms) });
   $("registerStatus").textContent = JSON.stringify({
     账号池: data.pool,
     自动补货: data.pool_autoreg,
@@ -435,9 +477,9 @@ function applyOverview(data) {
     日志循环: data.log_cleanup_loop,
   }, null, 2);
 }
-async function refresh(full = true) {
+async function refresh(full = true, opts = {}) {
   const data = await api("/api/overview");
-  applyOverview(data);
+  applyOverview(data, opts);
   if (full) {
     const creds = await api("/api/credentials?buckets=uploaded,pending");
     renderCreds(creds.items || []);
@@ -495,9 +537,10 @@ async function ensureAuth() {
 }
 async function main() {
   await ensureAuth();
+  wireConfigFormDirtyTracking();
   switchTab(state.activeTab, { animate: false, force: true });
   document.querySelectorAll(".nav-btn").forEach((btn) => { btn.onclick = () => switchTab(btn.dataset.tab, { animate: true }); });
-  $("btnRefresh").onclick = async () => withBusy($("btnRefresh"), async () => { try { await refresh(true); toast("已同步后端", true, { title: "同步完成" }); } catch (e) { toast(e.message, false); } }, "同步中...");
+  $("btnRefresh").onclick = async () => withBusy($("btnRefresh"), async () => { try { state.formsDirty = false; await refresh(true, { forceForms: true }); toast("已同步后端", true, { title: "同步完成" }); } catch (e) { toast(e.message, false); } }, "同步中...");
   $("btnLogout").onclick = async () => {
     try { await api("/api/auth/logout", { method: "POST", body: "{}" }); } catch (e) {}
     location.href = "/login";
@@ -505,7 +548,8 @@ async function main() {
   $("btnSaveRegister").onclick = async () => withBusy($("btnSaveRegister"), async () => {
     try {
       await api("/api/config", { method: "POST", body: JSON.stringify(collectRegisterConfig()) });
-      await refresh(true);
+      state.formsDirty = false;
+      await refresh(true, { forceForms: true });
       toast("设置已保存（未启动任务）", true, { title: "已保存" });
     } catch (e) { toast(e.message, false); }
   }, "保存中...");
@@ -533,7 +577,8 @@ async function main() {
   $("btnSaveSystem").onclick = async () => withBusy($("btnSaveSystem"), async () => {
     try {
       await api("/api/config", { method: "POST", body: JSON.stringify(collectSystemConfig()) });
-      await refresh(true);
+      state.formsDirty = false;
+      await refresh(true, { forceForms: true });
       toast("系统设置已保存", true, { title: "已保存" });
     } catch (e) { toast(e.message, false); }
   }, "保存中...");
