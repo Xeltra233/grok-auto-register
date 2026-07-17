@@ -386,6 +386,130 @@ def _read_json(handler: BaseHTTPRequestHandler) -> dict:
         return {}
 
 
+
+def _safe_rel_name(name: str) -> str:
+    text = str(name or "").replace("\\", "/").strip().lstrip("/")
+    if not text or ".." in text.split("/"):
+        return ""
+    # only simple relative names under known roots
+    if any(part in ("", ".", "..") for part in text.split("/")):
+        return ""
+    return text
+
+
+def _log_roots(cfg: Optional[dict] = None, root: Optional[Path] = None) -> list[dict]:
+    cfg = cfg or {}
+    base = Path(root) if root else _project_root()
+    log_dir = str(cfg.get("log_dir") or "logs")
+    goproxy_data = str(cfg.get("goproxy_data_dir") or "data/goproxy")
+    items = [
+        {"id": "app", "label": "应用日志", "dir": (base / log_dir).resolve(), "prefix": "app"},
+        {"id": "goproxy", "label": "GoProxy", "dir": (base / goproxy_data).resolve(), "prefix": "goproxy"},
+    ]
+    return items
+
+
+def _list_log_files(cfg: Optional[dict] = None, root: Optional[Path] = None) -> dict:
+    base = Path(root) if root else _project_root()
+    patterns = ("*.log", "*.err", "*.txt", "goproxy.manager.log", "goproxy.build.log")
+    files = []
+    for root_info in _log_roots(cfg, base):
+        d = root_info["dir"]
+        if not d.exists() or not d.is_dir():
+            continue
+        try:
+            for p in sorted(d.rglob("*"), key=lambda x: x.stat().st_mtime if x.is_file() else 0, reverse=True):
+                if not p.is_file():
+                    continue
+                name = p.name
+                if not (name.endswith((".log", ".err", ".txt")) or name in ("goproxy.manager.log", "goproxy.build.log")):
+                    continue
+                try:
+                    rel = str(p.relative_to(d)).replace("\\", "/")
+                except Exception:
+                    continue
+                try:
+                    stt = p.stat()
+                    size = int(stt.st_size)
+                    mtime = float(stt.st_mtime)
+                except Exception:
+                    size = 0
+                    mtime = 0.0
+                files.append({
+                    "id": f"{root_info['id']}:{rel}",
+                    "source": root_info["id"],
+                    "source_label": root_info["label"],
+                    "name": rel,
+                    "path": str(p),
+                    "size": size,
+                    "mtime": mtime,
+                })
+        except Exception:
+            continue
+    files.sort(key=lambda x: x.get("mtime") or 0, reverse=True)
+    return {
+        "ok": True,
+        "count": len(files),
+        "files": files[:200],
+        "sources": [{"id": x["id"], "label": x["label"]} for x in _log_roots(cfg, base)],
+    }
+
+
+def _resolve_log_file(file_id: str, cfg: Optional[dict] = None, root: Optional[Path] = None) -> Optional[Path]:
+    text = str(file_id or "").strip()
+    if not text or ":" not in text:
+        return None
+    source, rel = text.split(":", 1)
+    rel = _safe_rel_name(rel)
+    if not rel:
+        return None
+    for root_info in _log_roots(cfg, root):
+        if root_info["id"] != source:
+            continue
+        candidate = (root_info["dir"] / rel).resolve()
+        try:
+            candidate.relative_to(root_info["dir"])
+        except Exception:
+            return None
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _tail_file(path: Path, lines: int = 200, max_bytes: int = 256_000) -> dict:
+    lines = max(1, min(int(lines or 200), 2000))
+    max_bytes = max(4_000, min(int(max_bytes or 256_000), 2_000_000))
+    try:
+        size = path.stat().st_size
+    except Exception as exc:
+        return {"ok": False, "error": f"stat failed: {exc}"}
+    try:
+        with open(path, "rb") as f:
+            if size > max_bytes:
+                f.seek(-max_bytes, 2)
+                raw = f.read()
+            else:
+                raw = f.read()
+        text = raw.decode("utf-8", errors="replace")
+        # if we seeked mid-file, drop partial first line
+        if size > max_bytes and "\n" in text:
+            text = text.split("\n", 1)[1]
+        arr = text.splitlines()
+        tail = arr[-lines:]
+        return {
+            "ok": True,
+            "lines": len(tail),
+            "size": size,
+            "truncated": size > max_bytes or len(arr) > lines,
+            "content": "\n".join(tail),
+            "mtime": path.stat().st_mtime,
+            "name": path.name,
+            "path": str(path),
+        }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
 PANEL_COOKIE_NAME = "grok_panel_session"
 PANEL_PASSWORD_ENVS = (
     "GROK_PANEL_PASSWORD",
@@ -1044,6 +1168,33 @@ class PanelHandler(BaseHTTPRequestHandler):
             _save_config(cfg)
             STATE.reload()
             return _json_response(self, 200, {**res, "selection": describe_proxy_selection(STATE.config)})
+        if path == "/api/logs":
+            # list available log files
+            return _json_response(self, 200, _list_log_files(cfg, root=STATE.root))
+        if path == "/api/logs/tail":
+            file_id = ""
+            try:
+                file_id = str((query.get("id") or [""])[0] or "")
+            except Exception:
+                file_id = ""
+            if not file_id:
+                # also accept name alone under app logs for convenience
+                try:
+                    name = str((query.get("name") or [""])[0] or "")
+                except Exception:
+                    name = ""
+                if name:
+                    file_id = f"app:{_safe_rel_name(name)}"
+            try:
+                lines = int((query.get("lines") or ["200"])[0] or 200)
+            except Exception:
+                lines = 200
+            target = _resolve_log_file(file_id, cfg, root=STATE.root)
+            if target is None:
+                return _json_response(self, 404, {"ok": False, "error": "log file not found", "id": file_id})
+            res = _tail_file(target, lines=lines)
+            res["id"] = file_id
+            return _json_response(self, 200 if res.get("ok") else 500, res)
         if path == "/api/logs/cleanup":
             res = cleanup_logs(
                 log_dir=str(cfg.get("log_dir") or "logs"),
@@ -1135,14 +1286,28 @@ class PanelHandler(BaseHTTPRequestHandler):
                 "live_inspect_enabled",
                 "success_require_live",
                 "pool_autoreg_enabled",
+                "pool_autoreg_source",
                 "pool_autoreg_min_count",
                 "pool_autoreg_target_count",
                 "pool_autoreg_batch",
                 "pool_autoreg_interval_sec",
+                # remote live patrol
+                "remote_live_enabled",
+                "remote_live_interval_sec",
+                "remote_live_delete_on_fail",
+                "remote_live_model",
+                "remote_live_max_files",
+                "remote_live_batch",
+                "remote_live_proxy",
+                # local credential retain
+                "local_cred_retain_enabled",
+                "local_cred_retain_count",
+                "local_cred_retain_interval_sec",
                 # logs / panel
                 "log_cleanup_enabled",
                 "log_retain_days",
                 "log_max_total_mb",
+                "panel_token",
             }
             for k, v in body.items():
                 if k in allowed:
@@ -1158,7 +1323,77 @@ class PanelHandler(BaseHTTPRequestHandler):
                 cfg["goproxy_bind_cpa_proxy"] = False
             _save_config(cfg)
             STATE.reload()
-            return _json_response(self, 200, {"ok": True, "config": STATE.config})
+            # hot-apply background loops after config save
+            try:
+                stop_remote_live_loop()
+            except Exception:
+                pass
+            try:
+                cfg_now = STATE.config or {}
+                if bool(cfg_now.get("remote_live_enabled", False)):
+                    def _cfg_provider():
+                        current = STATE.reload()
+                        out = dict(current)
+                        out["_project_root"] = str(STATE.root)
+                        return out
+                    start_remote_live_loop(
+                        project_root=str(STATE.root),
+                        interval_sec=float(cfg_now.get("remote_live_interval_sec") or 7200),
+                        enabled=True,
+                        config_provider=_cfg_provider,
+                        run_immediately=False,
+                    )
+            except Exception:
+                pass
+            try:
+                stop_pool_autoreg_loop()
+            except Exception:
+                pass
+            try:
+                cfg_now = STATE.config or {}
+                if bool(cfg_now.get("pool_autoreg_enabled", False)):
+                    def _pool_cfg_provider():
+                        current = STATE.reload()
+                        out = dict(current)
+                        out["_project_root"] = str(STATE.root)
+                        return out
+                    start_pool_autoreg_loop(
+                        project_root=str(STATE.root),
+                        interval_sec=float(cfg_now.get("pool_autoreg_interval_sec") or 300),
+                        enabled=True,
+                        config_provider=_pool_cfg_provider,
+                        run_immediately=False,
+                    )
+            except Exception:
+                pass
+            try:
+                stop_local_cred_retain_loop()
+            except Exception:
+                pass
+            try:
+                cfg_now = STATE.config or {}
+                if bool(cfg_now.get("local_cred_retain_enabled", False)):
+                    def _retain_cfg_provider():
+                        current = STATE.reload()
+                        out = dict(current)
+                        out["_project_root"] = str(STATE.root)
+                        return out
+                    start_local_cred_retain_loop(
+                        project_root=str(STATE.root),
+                        interval_sec=float(cfg_now.get("local_cred_retain_interval_sec") or 600),
+                        enabled=True,
+                        config_provider=_retain_cfg_provider,
+                        run_immediately=False,
+                    )
+            except Exception:
+                pass
+            return _json_response(self, 200, {
+                "ok": True,
+                "config": STATE.config,
+                "remote_live": remote_live_status(),
+                "pool_autoreg": pool_autoreg_status(),
+                "local_cred_retain": local_cred_retain_status(),
+            })
         _json_response(self, 404, {"ok": False, "error": f"unknown api {path}"})
 
 

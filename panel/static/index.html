@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Grok Auto Panel</title>
-  <link rel="stylesheet" href="/static/styles.css?v=manual-count-1" />
+  <link rel="stylesheet" href="/static/styles.css?v=logs-tab-1" />
 </head>
 <body>
   <div class="bg-orb orb-a"></div>
@@ -33,6 +33,7 @@
       <button class="nav-btn" data-tab="register">注册设置</button>
       <button class="nav-btn" data-tab="proxy">本地代理</button>
       <button class="nav-btn" data-tab="credentials">本地凭证</button>
+      <button class="nav-btn" data-tab="logs">日志</button>
       <button class="nav-btn" data-tab="system">系统维护</button>
       <div class="nav-note">
         说明：凭证下载/删除操作的是本机产出文件。<br/>
@@ -199,6 +200,29 @@
       </section>
 
 
+      
+      <section id="tab-logs" class="tab-panel">
+        <div class="card glass">
+          <h2>日志</h2>
+          <p class="section-sub">查看应用日志与 GoProxy 日志尾部。默认只读最近内容，不自动改配置。</p>
+          <div class="row log-toolbar">
+            <label>日志文件
+              <select id="logFileSelect"></select>
+            </label>
+            <label>行数
+              <input id="logLines" type="number" min="50" max="2000" value="300" style="width:100px" />
+            </label>
+            <label class="check"><input id="logAutoRefresh" type="checkbox" /> 自动刷新</label>
+            <button id="btnLogRefresh" class="btn primary">刷新</button>
+            <button id="btnLogReloadList" class="btn">刷新列表</button>
+          </div>
+          <div class="hint-row">
+            <span class="pill" id="logMeta">未加载</span>
+          </div>
+          <pre id="logView" class="mono log-view">选择日志文件后点击刷新。</pre>
+        </div>
+      </section>
+
       <section id="tab-system" class="tab-panel">
         <div class="card glass">
           <h2>系统维护</h2>
@@ -224,6 +248,6 @@
   </div>
 
   <div id="toastStack" class="toast-stack" aria-live="polite" aria-relevant="additions"></div>
-  <script src="/static/app.js?v=manual-count-2"></script>
+  <script src="/static/app.js?v=logs-tab-1"></script>
 </body>
 </html>

@@ -47,6 +47,9 @@ const state = {
   activeTab: localStorage.getItem("grok_panel_tab") || "overview",
   formsHydrated: false,
   formsDirty: false,
+  logFiles: [],
+  logTimer: null,
+  selectedLogId: localStorage.getItem("grok_panel_log_id") || "",
 };
 
 const toastState = { seq: 0, items: [] };
@@ -197,6 +200,12 @@ function switchTab(tab, opts = {}) {
 
   state.activeTab = next;
   localStorage.setItem("grok_panel_tab", state.activeTab);
+  if (next === "logs") {
+    loadLogList().then(() => refreshLogView()).catch((e) => { if ($("logView")) $("logView").textContent = e.message || String(e); });
+    syncLogAutoRefresh();
+  } else {
+    stopLogAutoRefresh();
+  }
   document.querySelectorAll(".nav-btn").forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.tab === state.activeTab);
   });
@@ -581,6 +590,84 @@ async function ensureAuth() {
     if (String(e.message || "").includes("need login") || e.message === "unauthorized") throw e;
   }
 }
+
+function fmtLogMeta(info = {}) {
+  const parts = [];
+  if (info.id) parts.push(info.id);
+  if (info.size != null) parts.push(`大小 ${fmtSize(info.size)}`);
+  if (info.lines != null) parts.push(`${info.lines} 行`);
+  if (info.truncated) parts.push("已截断");
+  if (info.mtime) parts.push(`更新 ${fmtTime(info.mtime)}`);
+  return parts.join(" · ") || "未加载";
+}
+
+async function loadLogList() {
+  const res = await api("/api/logs");
+  state.logFiles = res.files || [];
+  const sel = $("logFileSelect");
+  if (!sel) return res;
+  const prev = state.selectedLogId || sel.value || "";
+  sel.innerHTML = "";
+  if (!state.logFiles.length) {
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "暂无日志文件";
+    sel.appendChild(opt);
+    return res;
+  }
+  state.logFiles.forEach((f) => {
+    const opt = document.createElement("option");
+    opt.value = f.id;
+    const when = f.mtime ? fmtTime(f.mtime) : "-";
+    opt.textContent = `[${f.source_label || f.source}] ${f.name} (${fmtSize(f.size || 0)}) ${when}`;
+    sel.appendChild(opt);
+  });
+  const exists = state.logFiles.some((f) => f.id === prev);
+  sel.value = exists ? prev : state.logFiles[0].id;
+  state.selectedLogId = sel.value;
+  localStorage.setItem("grok_panel_log_id", state.selectedLogId || "");
+  return res;
+}
+
+async function refreshLogView() {
+  const sel = $("logFileSelect");
+  const view = $("logView");
+  const meta = $("logMeta");
+  if (!sel || !view) return;
+  const id = sel.value || state.selectedLogId;
+  if (!id) {
+    view.textContent = "暂无日志文件。";
+    if (meta) meta.textContent = "未加载";
+    return;
+  }
+  state.selectedLogId = id;
+  localStorage.setItem("grok_panel_log_id", id);
+  const lines = Math.max(50, Math.min(2000, Number(($("logLines") && $("logLines").value) || 300)));
+  const res = await api(`/api/logs/tail?id=${encodeURIComponent(id)}&lines=${lines}`);
+  view.textContent = res.content || "(空日志)";
+  if (meta) meta.textContent = fmtLogMeta({ id, ...res });
+  // keep stick-to-bottom for live feel
+  view.scrollTop = view.scrollHeight;
+  return res;
+}
+
+function stopLogAutoRefresh() {
+  if (state.logTimer) {
+    clearInterval(state.logTimer);
+    state.logTimer = null;
+  }
+}
+
+function syncLogAutoRefresh() {
+  stopLogAutoRefresh();
+  const enabled = !!( $("logAutoRefresh") && $("logAutoRefresh").checked );
+  if (!enabled) return;
+  state.logTimer = setInterval(() => {
+    if (state.activeTab !== "logs") return;
+    refreshLogView().catch(() => {});
+  }, 3000);
+}
+
 async function main() {
   await ensureAuth();
   wireConfigFormDirtyTracking();
@@ -588,6 +675,22 @@ async function main() {
   await refresh(true);
   await loadConfigFormsOnce(true);
   document.querySelectorAll(".nav-btn").forEach((btn) => { btn.onclick = () => switchTab(btn.dataset.tab, { animate: true }); });
+  if ($("btnLogRefresh")) $("btnLogRefresh").onclick = async () => withBusy($("btnLogRefresh"), async () => {
+    try { await refreshLogView(); toast("日志已刷新", true, { title: "日志" }); }
+    catch (e) { toast(e.message, false); }
+  }, "刷新中...");
+  if ($("btnLogReloadList")) $("btnLogReloadList").onclick = async () => withBusy($("btnLogReloadList"), async () => {
+    try { await loadLogList(); await refreshLogView(); toast("日志列表已更新", true, { title: "日志" }); }
+    catch (e) { toast(e.message, false); }
+  }, "加载中...");
+  if ($("logFileSelect")) $("logFileSelect").onchange = async () => {
+    state.selectedLogId = $("logFileSelect").value || "";
+    localStorage.setItem("grok_panel_log_id", state.selectedLogId || "");
+    try { await refreshLogView(); } catch (e) { if ($("logView")) $("logView").textContent = e.message || String(e); }
+  };
+  if ($("logAutoRefresh")) $("logAutoRefresh").onchange = () => syncLogAutoRefresh();
+  if ($("logLines")) $("logLines").onchange = async () => { try { await refreshLogView(); } catch (e) {} };
+
   $("btnRefresh").onclick = async () => withBusy($("btnRefresh"), async () => { try { await refresh(true); toast("已同步状态（不影响配置表单）", true, { title: "同步完成" }); } catch (e) { toast(e.message, false); } }, "同步中...");
   $("btnLogout").onclick = async () => {
     try { await api("/api/auth/logout", { method: "POST", body: "{}" }); } catch (e) {}
@@ -595,11 +698,20 @@ async function main() {
   };
   $("btnSaveRegister").onclick = async () => withBusy($("btnSaveRegister"), async () => {
     try {
-      await api("/api/config", { method: "POST", body: JSON.stringify(collectRegisterConfig()) });
+      const saved = await api("/api/config", { method: "POST", body: JSON.stringify(collectRegisterConfig()) });
       state.formsDirty = false;
       state.formsHydrated = true;
+      // force rehydrate from server-saved config so checkboxes reflect persisted values
+      if (saved && saved.config) applyConfigForms(saved.config, { force: true });
       await refresh(true);
-      toast("设置已保存（未启动任务）", true, { title: "已保存" });
+      const rl = saved?.remote_live || saved?.config?.remote_live_enabled;
+      toast(
+        saved?.config?.remote_live_enabled
+          ? `设置已保存；远端测活巡检已开启（间隔 ${saved?.config?.remote_live_interval_sec || 7200}s）`
+          : "设置已保存；远端测活巡检关闭",
+        true,
+        { title: "已保存" }
+      );
     } catch (e) { toast(e.message, false); }
   }, "保存中...");
   if ($("btnStartManualRegister")) $("btnStartManualRegister").onclick = async () => withBusy($("btnStartManualRegister"), async () => {

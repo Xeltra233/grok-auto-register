@@ -541,3 +541,22 @@ body.login-body .login-error {
   margin-top: 10px;
 }
 
+
+
+/* logs tab */
+.log-toolbar { flex-wrap: wrap; gap: 10px; align-items: end; }
+.log-view {
+  margin-top: 12px;
+  min-height: 360px;
+  max-height: calc(100vh - 280px);
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  line-height: 1.45;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid var(--surface-border);
+  background: rgba(10, 16, 28, 0.72);
+  color: #d7e4ff;
+}
