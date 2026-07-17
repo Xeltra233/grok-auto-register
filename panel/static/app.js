@@ -417,12 +417,19 @@ function collectSystemConfig() {
 function applyOverview(data, opts = {}) {
   state.overview = data;
   setLastSync(data.ts || Date.now() / 1000);
+  const need = data.pool_need || data.pool?.need || {};
+  const current = (need.current_total != null ? need.current_total : data.pool?.total);
+  const target = (need.target_count != null ? need.target_count : (data.config?.pool_autoreg_target_count ?? data.config?.pool_autoreg_min_count ?? 0));
+  const remain = (need.deficit != null ? need.deficit : Math.max(Number(target || 0) - Number(current || 0), 0));
+  const trigger = (need.trigger_count != null ? need.trigger_count : (data.config?.pool_autoreg_min_count ?? 5));
   $("mProxy").textContent = data.goproxy?.running ? "运行中" : "未运行";
-  $("mPool").textContent = data.pool?.total ?? "-";
+  $("mPool").textContent = current ?? "-";
+  if ($("mTarget")) $("mTarget").textContent = target ?? "-";
+  if ($("mRemain")) $("mRemain").textContent = remain ?? "-";
   $("pillLive").textContent = `测活门槛: ${data.config?.live_inspect_enabled === false ? "关闭" : "开启"}`;
   $("pillBind").textContent = `全局代理: ${(data.config?.proxy_mode || (data.config?.goproxy_bind_register_proxy ? "goproxy" : "custom")) === "goproxy" ? "本机 GoProxy" : "自有代理"}`;
   const used = data.pool?.used_source || data.config?.pool_autoreg_source || "remote";
-  $("pillPool").textContent = `账号池: ${data.pool?.total ?? 0} / 触发 ${data.config?.pool_autoreg_min_count ?? 5} / 目标 ${data.config?.pool_autoreg_target_count ?? data.config?.pool_autoreg_min_count ?? 5} / 自动补货${data.config?.pool_autoreg_enabled ? "开" : "关"}`;
+  $("pillPool").textContent = `账号池: 当前 ${current ?? 0} / 触发 ${trigger} / 目标 ${target ?? 0} / 还差 ${remain ?? 0} / 自动补货${data.config?.pool_autoreg_enabled ? "开" : "关"}`;
   $("pillSource").textContent = `统计来源: ${SOURCE_LABELS[used] || used}${data.pool?.fallback ? "（已回退）" : ""}`;
   $("overviewExtra").textContent = JSON.stringify({
     说明: "凭证库是本机产出；远端只负责推送。绑定=注册代理改走本机 GoProxy 端口。",
@@ -434,11 +441,9 @@ function applyOverview(data, opts = {}) {
     日志清理: data.log_cleanup,
     ts: data.ts,
   }, null, 2);
-  const forceSelects = !!(opts && opts.forceForms) || !state.formsDirty;
-  if (forceSelects && document.activeElement !== $("poolMode")) {
+  // Proxy selects are form fields too: only fill once, never from SSE.
+  if (!state.formsHydrated) {
     fillSelect($("poolMode"), data.modes || Object.entries(MODE_LABELS).map(([id, label]) => ({ id, label })), data.config?.goproxy_pool_mode, (id) => MODE_LABELS[id] || id);
-  }
-  if (forceSelects && document.activeElement !== $("endpoint")) {
     fillSelect($("endpoint"), data.endpoints || Object.entries(ENDPOINT_LABELS).map(([id, label]) => ({ id, label })), data.config?.goproxy_endpoint, (id) => ENDPOINT_LABELS[id] || id);
   }
   if ($("bindProxy") && document.activeElement !== $("bindProxy")) $("bindProxy").checked = !!data.config?.goproxy_bind_register_proxy;
@@ -457,7 +462,7 @@ function applyOverview(data, opts = {}) {
     管理页: `http://127.0.0.1:${data.goproxy?.ports?.webui || data.proxy?.ports?.webui || 17878}/`,
     默认密码: "goproxy",
   }, null, 2);
-  applyConfigForms(data.config || {}, { force: !!(opts && opts.forceForms) });
+  // Config forms are intentionally NOT refreshed by overview/SSE.
   $("registerStatus").textContent = JSON.stringify({
     账号池: data.pool,
     自动补货: data.pool_autoreg,
@@ -477,13 +482,28 @@ function applyOverview(data, opts = {}) {
     日志循环: data.log_cleanup_loop,
   }, null, 2);
 }
-async function refresh(full = true, opts = {}) {
+async function loadConfigFormsOnce(force = false) {
+  if (state.formsHydrated && !force) return;
+  if (state.formsDirty && !force) return;
+  try {
+    const res = await api("/api/config");
+    applyConfigForms((res && res.config) || {}, { force: true });
+  } catch (e) {
+    // fallback: use last overview config if present
+    if (state.overview && state.overview.config) {
+      applyConfigForms(state.overview.config, { force: true });
+    }
+  }
+}
+
+async function refresh(full = true) {
   const data = await api("/api/overview");
-  applyOverview(data, opts);
+  applyOverview(data);
   if (full) {
     const creds = await api("/api/credentials?buckets=uploaded,pending");
     renderCreds(creds.items || []);
   }
+  // Never rewrite config forms here.
 }
 function downloadBase64Zip(filename, b64) {
   const bin = atob(b64);
@@ -539,8 +559,10 @@ async function main() {
   await ensureAuth();
   wireConfigFormDirtyTracking();
   switchTab(state.activeTab, { animate: false, force: true });
+  await refresh(true);
+  await loadConfigFormsOnce(true);
   document.querySelectorAll(".nav-btn").forEach((btn) => { btn.onclick = () => switchTab(btn.dataset.tab, { animate: true }); });
-  $("btnRefresh").onclick = async () => withBusy($("btnRefresh"), async () => { try { state.formsDirty = false; await refresh(true, { forceForms: true }); toast("已同步后端", true, { title: "同步完成" }); } catch (e) { toast(e.message, false); } }, "同步中...");
+  $("btnRefresh").onclick = async () => withBusy($("btnRefresh"), async () => { try { await refresh(true); toast("已同步状态（不影响配置表单）", true, { title: "同步完成" }); } catch (e) { toast(e.message, false); } }, "同步中...");
   $("btnLogout").onclick = async () => {
     try { await api("/api/auth/logout", { method: "POST", body: "{}" }); } catch (e) {}
     location.href = "/login";
@@ -549,7 +571,8 @@ async function main() {
     try {
       await api("/api/config", { method: "POST", body: JSON.stringify(collectRegisterConfig()) });
       state.formsDirty = false;
-      await refresh(true, { forceForms: true });
+      state.formsHydrated = true;
+      await refresh(true);
       toast("设置已保存（未启动任务）", true, { title: "已保存" });
     } catch (e) { toast(e.message, false); }
   }, "保存中...");
@@ -578,7 +601,8 @@ async function main() {
     try {
       await api("/api/config", { method: "POST", body: JSON.stringify(collectSystemConfig()) });
       state.formsDirty = false;
-      await refresh(true, { forceForms: true });
+      state.formsHydrated = true;
+      await refresh(true);
       toast("系统设置已保存", true, { title: "已保存" });
     } catch (e) { toast(e.message, false); }
   }, "保存中...");
@@ -682,7 +706,6 @@ async function main() {
     } catch (e) { toast(e.message, false); }
   };
   document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(true).catch(() => {}); });
-  await refresh(true);
   startSSE();
   startPollFallback();
 }

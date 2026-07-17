@@ -41,6 +41,7 @@ from panel.remote_live import (
     stop_remote_live_loop,
 )
 from panel.pool_autoreg import (
+    compute_register_need,
     evaluate_and_maybe_trigger as pool_autoreg_tick,
     pool_counts,
     start_manual_registration,
@@ -383,6 +384,26 @@ class PanelHandler(BaseHTTPRequestHandler):
     def _overview_payload(self) -> dict:
         cfg = STATE.reload()
         g = STATE.manager.status()
+        pool = pool_counts(cfg, root=str(STATE.root))
+        try:
+            pool_need = compute_register_need(
+                current_total=int(pool.get("total") or 0) if pool.get("ok") else 0,
+                min_count=int(cfg.get("pool_autoreg_min_count") or 5),
+                target_count=int(
+                    cfg.get("pool_autoreg_target_count")
+                    if cfg.get("pool_autoreg_target_count") is not None
+                    else (cfg.get("pool_autoreg_min_count") or 5)
+                ),
+                batch=0,
+            )
+        except Exception:
+            pool_need = {
+                "deficit": 0,
+                "target_count": int(cfg.get("pool_autoreg_target_count") or cfg.get("pool_autoreg_min_count") or 0),
+                "current_total": int((pool or {}).get("total") or 0),
+                "should_register": False,
+            }
+        pool = {**(pool or {}), "need": pool_need}
         creds = list_credentials(cfg, buckets=("uploaded", "pending"), root=STATE.root)
         return {
             "ok": True,
@@ -395,7 +416,8 @@ class PanelHandler(BaseHTTPRequestHandler):
             },
             "log_cleanup": STATE.last_log_cleanup,
             "log_cleanup_loop": log_cleanup_status(),
-            "pool": pool_counts(cfg, root=str(STATE.root)),
+            "pool": pool,
+            "pool_need": pool_need,
             "pool_autoreg": pool_autoreg_status(),
             "remote_live": remote_live_status(),
             "local_cred_retain": local_cred_retain_status(),
