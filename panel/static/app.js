@@ -469,6 +469,8 @@ function applyOverview(data, opts = {}) {
     pid: data.goproxy?.pid,
     二进制: data.goproxy?.binary,
     最近错误: data.goproxy?.last_error,
+    日志路径: data.goproxy?.log_path,
+    日志尾部: data.goproxy?.log_tail,
     端口状态: data.goproxy?.port_status,
     管理页: (typeof goproxyWebuiUrl === "function" ? goproxyWebuiUrl() : (window.location.origin + "/goproxy/")),
     管理页路径: data.goproxy?.webui_path || "/goproxy/",

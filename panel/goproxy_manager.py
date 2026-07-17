@@ -23,6 +23,7 @@ import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from panel.settings import (
@@ -60,6 +61,42 @@ def _port_open(host: str, port: int, timeout: float = 0.05) -> bool:
         return False
 
 
+def _probe_host(host: Optional[str] = None) -> str:
+    """Host used for local readiness probes / reverse-proxy.
+
+    Bind address 0.0.0.0 cannot be used as connect target.
+    """
+    h = str(host or "127.0.0.1").strip() or "127.0.0.1"
+    if h in ("0.0.0.0", "::", "[::]", "*"):
+        return "127.0.0.1"
+    return h
+
+
+def _file_magic(path: str) -> str:
+    try:
+        with open(path, "rb") as f:
+            b = f.read(4)
+        if b[:2] == b"MZ":
+            return "pe"
+        if b[:4] == b"\x7fELF":
+            return "elf"
+        if b in (b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xfe\xed\xfa\xce"):
+            return "macho"
+        return b.hex() or "empty"
+    except Exception as exc:
+        return f"unreadable:{exc}"
+
+
+def _tail_text(path: str, max_chars: int = 1200) -> str:
+    try:
+        if not path or not os.path.isfile(path):
+            return ""
+        data = Path(path).read_text(encoding="utf-8", errors="replace")
+        return data[-max_chars:]
+    except Exception:
+        return ""
+
+
 def _is_windows_pe(path: str) -> bool:
     try:
         with open(path, "rb") as f:
@@ -72,7 +109,19 @@ def _is_runnable_binary(path: str) -> bool:
     if not path or not os.path.isfile(path):
         return False
     if os.name == "nt":
-        return _is_windows_pe(path) or path.lower().endswith(".exe")
+        # Only trust real PE headers; wrong-arch .exe leftovers must be rejected.
+        return _is_windows_pe(path)
+    # reject Mach-O / PE when running on *nix
+    try:
+        with open(path, "rb") as f:
+            magic = f.read(4)
+        if magic[:2] == b"MZ":
+            return False
+        if magic in (b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xfe\xed\xfa\xce"):
+            # still ok if native, but check executable bit below
+            pass
+    except OSError:
+        return False
     return os.access(path, os.X_OK)
 
 
@@ -147,7 +196,14 @@ class GoProxyManager:
         os.makedirs(path, exist_ok=True)
         return path
 
+    def preferred_binary_path(self) -> str:
+        src = self.source_dir()
+        if os.name == "nt":
+            return os.path.join(src, "bin", "proxygo-windows.exe")
+        return os.path.join(src, "bin", "proxygo")
+
     def bin_candidates(self):
+        """Yield candidate binaries; wrong-arch files are filtered by _is_runnable_binary."""
         configured = (self.config.get("goproxy_bin_path") or "").strip()
         names = []
         if configured:
@@ -156,20 +212,25 @@ class GoProxyManager:
         if os.name == "nt":
             names.extend(
                 [
+                    # Prefer explicit Windows artifact first.
+                    os.path.join(src, "bin", "proxygo-windows.exe"),
                     os.path.join(src, "bin", "proxygo.exe"),
                     os.path.join(src, "bin", "goproxy.exe"),
+                    os.path.join(src, "bin", "proxy-pool.exe"),
                     os.path.join(src, "proxygo.exe"),
                     os.path.join(src, "proxy-pool.exe"),
                 ]
             )
-        names.extend(
-            [
-                os.path.join(src, "bin", "proxygo"),
-                os.path.join(src, "bin", "goproxy"),
-                os.path.join(src, "proxygo"),
-                os.path.join(src, "proxy-pool"),
-            ]
-        )
+        else:
+            names.extend(
+                [
+                    os.path.join(src, "bin", "proxygo"),
+                    os.path.join(src, "bin", "proxy-pool"),
+                    os.path.join(src, "bin", "goproxy"),
+                    os.path.join(src, "proxygo"),
+                    os.path.join(src, "proxy-pool"),
+                ]
+            )
         # de-dup preserve order
         seen = set()
         for item in names:
@@ -185,45 +246,119 @@ class GoProxyManager:
             built = self.build_binary()
             if built:
                 return built
-        # return preferred path even if missing (for error messages)
-        preferred = (
-            os.path.join(self.source_dir(), "bin", "proxygo.exe")
-            if os.name == "nt"
-            else os.path.join(self.source_dir(), "bin", "proxygo")
-        )
-        return preferred
+        return self.preferred_binary_path()
+
+    def _find_c_compiler(self) -> str:
+        """Locate gcc/clang for CGO (mattn/go-sqlite3 needs it)."""
+        for name in ("gcc", "clang", "x86_64-w64-mingw32-gcc"):
+            found = shutil.which(name)
+            if found:
+                return found
+        roots = [
+            os.path.join(self.root, "third_party", "toolchains"),
+            os.path.join(self.root, "third_party", "toolchains", "mingw64"),
+            os.path.join(self.root, "third_party", "toolchains", "winlibs"),
+        ]
+        for root in roots:
+            if not os.path.isdir(root):
+                continue
+            depth_root = root.count(os.sep)
+            for dirpath, dirnames, filenames in os.walk(root):
+                for fname in ("gcc.exe", "gcc"):
+                    if fname in filenames:
+                        candidate = os.path.join(dirpath, fname)
+                        if os.path.isfile(candidate):
+                            return candidate
+                if dirpath.count(os.sep) - depth_root > 6:
+                    dirnames[:] = []
+        return ""
+
+    def _prepare_build_env(self) -> dict:
+        """Prefer pure-Go build (modernc sqlite). Fall back to CGO if forced."""
+        env = os.environ.copy()
+        force_cgo = str(env.get("GOPROXY_FORCE_CGO") or self.config.get("goproxy_force_cgo") or "").strip().lower() in {
+            "1", "true", "yes", "on",
+        }
+        if force_cgo:
+            env["CGO_ENABLED"] = "1"
+            gcc = self._find_c_compiler()
+            if gcc:
+                env["CC"] = gcc
+                gcc_dir = os.path.dirname(gcc)
+                path_parts = env.get("PATH", "").split(os.pathsep)
+                if gcc_dir and gcc_dir not in path_parts:
+                    env["PATH"] = gcc_dir + os.pathsep + env.get("PATH", "")
+        else:
+            # Vendored GoProxy uses modernc.org/sqlite so host deploy can self-build without gcc.
+            env["CGO_ENABLED"] = "0"
+            env.pop("CC", None)
+        return env
 
     def build_binary(self) -> str:
+        """Compile vendored GoProxy source for the current platform."""
         go = shutil.which("go")
         if not go:
-            self._last_error = "go toolchain not found; cannot build GoProxy"
+            self._last_error = "未找到 go 工具链，无法从源码编译 GoProxy"
             return ""
         src = self.source_dir()
         if not os.path.isfile(os.path.join(src, "main.go")):
-            self._last_error = f"GoProxy source missing: {src}"
+            self._last_error = f"GoProxy 源码缺失: {src}"
             return ""
+
+        force_cgo = str(os.environ.get("GOPROXY_FORCE_CGO") or self.config.get("goproxy_force_cgo") or "").strip().lower() in {
+            "1", "true", "yes", "on",
+        }
+        if force_cgo and not self._find_c_compiler():
+            self._last_error = (
+                "已强制 CGO，但未找到 gcc。请安装 MinGW-w64 / build-essential，"
+                "或取消 goproxy_force_cgo / GOPROXY_FORCE_CGO。"
+            )
+            return ""
+
         out_dir = os.path.join(src, "bin")
         os.makedirs(out_dir, exist_ok=True)
-        out = os.path.join(out_dir, "proxygo.exe" if os.name == "nt" else "proxygo")
-        env = os.environ.copy()
-        # sqlite driver needs cgo on many platforms
-        env.setdefault("CGO_ENABLED", "1")
+        if os.name == "nt":
+            out = os.path.join(out_dir, "proxygo-windows.exe")
+        else:
+            out = os.path.join(out_dir, "proxygo")
+
+        env = self._prepare_build_env()
+        env.pop("GOOS", None)
+        env.pop("GOARCH", None)
+
+        log_path = os.path.join(self.data_dir(), "goproxy.build.log")
         cmd = [go, "build", "-o", out, "."]
         try:
-            proc = subprocess.run(
-                cmd,
-                cwd=src,
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=600,
-            )
+            with open(log_path, "a", encoding="utf-8", errors="replace") as logf:
+                logf.write(
+                    f"\n--- build {time.strftime('%Y-%m-%d %H:%M:%S')} "
+                    f"go={go} cc={env.get('CC')} out={out} ---\n"
+                )
+                logf.flush()
+                proc = subprocess.run(
+                    cmd,
+                    cwd=src,
+                    env=env,
+                    stdout=logf,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    timeout=900,
+                )
         except Exception as exc:
             self._last_error = f"go build failed: {exc}"
             return ""
-        if proc.returncode != 0 or not os.path.isfile(out):
-            err = (proc.stderr or proc.stdout or "").strip()
-            self._last_error = f"go build failed ({proc.returncode}): {err[:800]}"
+        if proc.returncode != 0 or not _is_runnable_binary(out):
+            err_tail = ""
+            try:
+                if os.path.isfile(log_path):
+                    err_tail = Path(log_path).read_text(encoding="utf-8", errors="replace")[-800:]
+            except Exception:
+                err_tail = ""
+            self._last_error = (
+                f"从源码编译 GoProxy 失败 (code={proc.returncode})。"
+                f" 日志: {log_path}"
+                + (f"\n{err_tail}" if err_tail else "")
+            )
             return ""
         self._last_error = ""
         return out
@@ -334,11 +469,11 @@ class GoProxyManager:
             if self._proc is not None and self._proc.poll() is None:
                 return True
             # treat listening webui/http random as running (externally started)
-            host = self.config.get("goproxy_host") or "127.0.0.1"
-            webui = int(self.config.get("goproxy_webui_port") or 7778)
+            host = _probe_host(self.config.get("goproxy_host"))
+            webui = int(self.config.get("goproxy_webui_port") or 17878)
             if _port_open(host, webui, timeout=0.05):
                 return True
-            http_random = int(self.config.get("goproxy_http_random_port") or 7777)
+            http_random = int(self.config.get("goproxy_http_random_port") or 17877)
             return _port_open(host, http_random, timeout=0.05)
 
     def managed_pid(self) -> Optional[int]:
@@ -348,13 +483,13 @@ class GoProxyManager:
             return None
 
     def port_status(self) -> Dict[str, bool]:
-        host = self.config.get("goproxy_host") or "127.0.0.1"
+        host = _probe_host(self.config.get("goproxy_host"))
         ports = {
-            "http_random": int(self.config.get("goproxy_http_random_port") or 7777),
-            "http_stable": int(self.config.get("goproxy_http_stable_port") or 7776),
-            "socks5_random": int(self.config.get("goproxy_socks5_random_port") or 7779),
-            "socks5_stable": int(self.config.get("goproxy_socks5_stable_port") or 7780),
-            "webui": int(self.config.get("goproxy_webui_port") or 7778),
+            "http_random": int(self.config.get("goproxy_http_random_port") or 17877),
+            "http_stable": int(self.config.get("goproxy_http_stable_port") or 17876),
+            "socks5_random": int(self.config.get("goproxy_socks5_random_port") or 17879),
+            "socks5_stable": int(self.config.get("goproxy_socks5_stable_port") or 17880),
+            "webui": int(self.config.get("goproxy_webui_port") or 17878),
         }
         return {name: _port_open(host, port, timeout=0.05) for name, port in ports.items()}
 
@@ -378,6 +513,8 @@ class GoProxyManager:
                 "ports": sel["ports"],
                 "port_status": self.port_status(),
                 "last_error": self._last_error,
+                "log_path": os.path.join(self.data_dir(), "goproxy.manager.log"),
+                "log_tail": _tail_text(os.path.join(self.data_dir(), "goproxy.manager.log"), 800) if self._last_error else "",
                 "modes": self.list_modes(),
                 "endpoints": self.list_endpoints(),
             }
@@ -410,9 +547,32 @@ class GoProxyManager:
             os.makedirs(workdir, exist_ok=True)
 
             env = build_goproxy_env(self.config, base_env=os.environ.copy())
-            # absolute DATA_DIR for child
+            # absolute DATA_DIR for child (critical in Docker / reverse-proxy)
+            os.makedirs(data_dir, exist_ok=True)
             env["DATA_DIR"] = data_dir
-            # ensure child cwd finds relative paths under source/data
+            # force connect-friendly host for child-facing config consumers
+            env["WEBUI_PORT"] = str(int(self.config.get("goproxy_webui_port") or 17878))
+            env["RANDOM_PORT"] = str(int(self.config.get("goproxy_http_random_port") or 17877))
+            env["STABLE_PORT"] = str(int(self.config.get("goproxy_http_stable_port") or 17876))
+            env["SOCKS5_RANDOM_PORT"] = str(int(self.config.get("goproxy_socks5_random_port") or 17879))
+            env["SOCKS5_STABLE_PORT"] = str(int(self.config.get("goproxy_socks5_stable_port") or 17880))
+
+            # On Linux/container, refuse PE leftovers and ensure +x.
+            magic = _file_magic(binary)
+            if os.name != "nt" and magic == "pe":
+                self._last_error = (
+                    f"GoProxy binary is Windows PE, not runnable in Linux container: {binary}. "
+                    "Rebuild image so third_party/goproxy/bin/proxygo is Linux ELF."
+                )
+                return {"ok": False, "error": self._last_error, "status": self.status()}
+            if os.name != "nt":
+                try:
+                    mode = os.stat(binary).st_mode
+                    if not (mode & 0o111):
+                        os.chmod(binary, mode | 0o755)
+                except Exception:
+                    pass
+
             log_path = os.path.join(data_dir, "goproxy.manager.log")
             try:
                 if self._log_fp:
@@ -421,7 +581,12 @@ class GoProxyManager:
                     except Exception:
                         pass
                 self._log_fp = open(log_path, "a", encoding="utf-8", errors="replace")
-                self._log_fp.write(f"\n--- start {time.strftime('%Y-%m-%d %H:%M:%S')} bin={binary} ---\n")
+                self._log_fp.write(
+                    f"\n--- start {time.strftime('%Y-%m-%d %H:%M:%S')} "
+                    f"bin={binary} magic={magic} size={os.path.getsize(binary) if os.path.isfile(binary) else -1} "
+                    f"cwd={workdir} DATA_DIR={data_dir} "
+                    f"WEBUI_PORT={env.get('WEBUI_PORT')} RANDOM_PORT={env.get('RANDOM_PORT')} ---\n"
+                )
                 self._log_fp.flush()
                 creationflags = 0
                 if os.name == "nt":
@@ -444,9 +609,28 @@ class GoProxyManager:
             ready = self._wait_ready(wait_sec=wait_sec)
             if not ready:
                 # process may still be warming up; report partial
-                if self._proc.poll() is not None:
-                    self._last_error = f"GoProxy exited early with code {self._proc.returncode}; see {log_path}"
-                    return {"ok": False, "error": self._last_error, "status": self.status()}
+                code = self._proc.poll() if self._proc is not None else None
+                if code is not None:
+                    # flush log and include tail so panel/UI can show real reason
+                    try:
+                        if self._log_fp:
+                            self._log_fp.flush()
+                    except Exception:
+                        pass
+                    tail = _tail_text(log_path, 1500)
+                    self._last_error = (
+                        f"GoProxy exited early with code {code}; log={log_path}"
+                        + (f"\n---- log tail ----\n{tail}" if tail else "")
+                    )
+                    return {
+                        "ok": False,
+                        "error": self._last_error,
+                        "log_path": log_path,
+                        "log_tail": tail,
+                        "binary": binary,
+                        "magic": magic,
+                        "status": self.status(),
+                    }
                 self._last_error = f"GoProxy started pid={self._proc.pid} but ports not ready yet; log={log_path}"
                 return {
                     "ok": True,
@@ -457,14 +641,14 @@ class GoProxyManager:
             return {"ok": True, "status": self.status()}
 
     def _wait_ready(self, wait_sec: float = 8.0) -> bool:
-        host = self.config.get("goproxy_host") or "127.0.0.1"
+        host = _probe_host(self.config.get("goproxy_host"))
         # webui or any proxy port is enough signal
         ports = [
-            int(self.config.get("goproxy_webui_port") or 7778),
-            int(self.config.get("goproxy_http_random_port") or 7777),
-            int(self.config.get("goproxy_http_stable_port") or 7776),
-            int(self.config.get("goproxy_socks5_random_port") or 7779),
-            int(self.config.get("goproxy_socks5_stable_port") or 7780),
+            int(self.config.get("goproxy_webui_port") or 17878),
+            int(self.config.get("goproxy_http_random_port") or 17877),
+            int(self.config.get("goproxy_http_stable_port") or 17876),
+            int(self.config.get("goproxy_socks5_random_port") or 17879),
+            int(self.config.get("goproxy_socks5_stable_port") or 17880),
         ]
         deadline = time.time() + max(float(wait_sec), 0.5)
         while time.time() < deadline:

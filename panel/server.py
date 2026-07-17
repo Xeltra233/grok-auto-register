@@ -195,11 +195,19 @@ def _ensure_goproxy_webui(timeout: float = 8.0) -> dict:
         return {"ok": False, "error": str(exc)}
     if _goproxy_webui_ready(timeout=0.4):
         return {"ok": True, "started": True, "result": res}
+    err = (res or {}).get("error") or (res or {}).get("warning") or "GoProxy WebUI not listening"
+    tail = (res or {}).get("log_tail") or ""
+    if not tail:
+        try:
+            tail = str((res or {}).get("status", {}).get("log_tail") or "")
+        except Exception:
+            tail = ""
     return {
         "ok": False,
-        "error": (res or {}).get("error") or (res or {}).get("warning") or "GoProxy WebUI not listening",
+        "error": err,
         "result": res,
-        "hint": "本地 GoProxy 未监听 WebUI 端口；请看面板代理状态/日志后重试",
+        "hint": "本地 GoProxy 未监听 WebUI 端口；请看 /app/data/goproxy/goproxy.manager.log",
+        "log_tail": tail,
     }
 
 

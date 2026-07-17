@@ -99,7 +99,16 @@ def _patch_runtime_config(host: str, port: int) -> None:
             data["goproxy_auto_start"] = True
             bin_path = ROOT / "third_party" / "goproxy" / "bin" / "proxygo"
             if bin_path.is_file():
-                data.setdefault("goproxy_bin_path", str(bin_path))
+                data["goproxy_bin_path"] = str(bin_path)
+            data["goproxy_data_dir"] = str(ROOT / "data" / "goproxy")
+            data["goproxy_workdir"] = str(ROOT / "third_party" / "goproxy")
+            data["goproxy_host"] = "127.0.0.1"
+            # keep default high ports unless already set
+            data.setdefault("goproxy_webui_port", 17878)
+            data.setdefault("goproxy_http_random_port", 17877)
+            data.setdefault("goproxy_http_stable_port", 17876)
+            data.setdefault("goproxy_socks5_random_port", 17879)
+            data.setdefault("goproxy_socks5_stable_port", 17880)
         else:
             data["goproxy_enabled"] = False
             data["goproxy_auto_start"] = False

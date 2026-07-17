@@ -73,6 +73,9 @@ RUN mkdir -p /app/third_party/goproxy/bin /app/config /app/logs /app/cpa_auths /
 COPY --from=goproxy-builder /out/bin/proxygo /app/third_party/goproxy/bin/proxygo
 COPY --from=goproxy-builder /out/bin/sing-box /usr/local/bin/sing-box
 RUN chmod +x /app/third_party/goproxy/bin/proxygo /usr/local/bin/sing-box \
+    && mkdir -p /app/data/goproxy /app/logs /app/cpa_auths \
+    && ln -sf /app/third_party/goproxy/bin/proxygo /app/third_party/goproxy/bin/proxy-pool \
+    && if head -c 2 /app/third_party/goproxy/bin/proxygo | grep -q MZ; then echo 'ERROR: proxygo is Windows PE; expected Linux ELF' >&2; exit 1; fi \
     && if [ ! -f /app/config/config.json ]; then \
          if [ -f /app/config/config.example.json ]; then \
            cp /app/config/config.example.json /app/config/config.json; \
