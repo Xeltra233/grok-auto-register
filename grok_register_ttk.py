@@ -1459,7 +1459,24 @@ def create_browser_options():
             options.set_browser_path(binary)
         except Exception:
             options.set_argument(f"--binary-path={binary}")
-    headless = bool(config.get("browser_headless") or config.get("register_headless") or os.environ.get("REGISTER_HEADLESS") or os.environ.get("BROWSER_HEADLESS"))
+    def _as_bool(value, default=False):
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().lower()
+        if text in ("1", "true", "yes", "on", "y"):
+            return True
+        if text in ("0", "false", "no", "off", "n", ""):
+            return False
+        return default
+
+    headless = (
+        _as_bool(config.get("browser_headless"), False)
+        or _as_bool(config.get("register_headless"), False)
+        or _as_bool(os.environ.get("REGISTER_HEADLESS"), False)
+        or _as_bool(os.environ.get("BROWSER_HEADLESS"), False)
+    )
     # In container without DISPLAY, force headless.
     if not headless and not str(os.environ.get("DISPLAY") or "").strip() and os.name != "nt":
         headless = True
