@@ -114,9 +114,9 @@ def export_cpa_xai_for_account(
     probe = bool(cfg.get("cpa_probe_after_write", False))
     probe_chat = bool(cfg.get("cpa_probe_chat", False))
     probe_strict = bool(cfg.get("cpa_probe_strict", False))
-    live_inspect = bool(cfg.get("live_inspect_enabled", cfg.get("cpa_live_inspect", False)))
+    live_inspect = bool(cfg.get("live_inspect_enabled", cfg.get("cpa_live_inspect", True)))
     # Success gate: live inspect pass is required before keep/push.
-    if bool(cfg.get("success_require_live", False)):
+    if bool(cfg.get("success_require_live", True)):
         live_inspect = True
     timeout = float(cfg.get("cpa_mint_timeout_sec", 240))
     base_url = cfg.get("cpa_base_url") or "https://cli-chat-proxy.grok.com/v1"
