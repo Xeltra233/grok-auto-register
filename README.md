@@ -40,6 +40,7 @@ Grok Register 是一个面向自动化流程研究、测试环境验证和个人
 - [稳定性机制](#稳定性机制)
 - [常见问题](#常见问题)
 - [目录结构](#目录结构)
+- [分支版：Web 面板 + 内嵌 GoProxy](#分支版web-面板--内嵌-goproxy)
 - [License](#license)
 - [Acknowledgments](#acknowledgments)
 - [Star History](#star-history)
@@ -50,7 +51,7 @@ Grok Register 是一个面向自动化流程研究、测试环境验证和个人
 - 支持 CLI 终端运行，不启动 Tk GUI。
 - 注册流程使用 Chromium/Chrome 浏览器页面完成。
 - 支持多 worker 并发注册（`concurrent_count`），每个 worker 独立浏览器与隔离 profile。
-- 支持 DuckMail、YYDS、Cloudflare 临时邮箱接口。
+- 支持 DuckMail、YYDS、Cloudflare、Freemail、iCloud Hide My Email 邮箱接口。
 - 支持验证码邮件轮询和解析。
 - 支持成功账号实时写入 `accounts_*.txt`。
 - 支持将 SSO token 写入 grok2api 本地或远端池。
@@ -58,6 +59,7 @@ Grok Register 是一个面向自动化流程研究、测试环境验证和个人
 - 支持 CPA xAI 凭证异步导出（默认独立 mint 浏览器，不占用注册页）。
 - 支持日志级别（`quiet` / `info` / `debug`）与每分钟创建速度统计。
 - 支持页面卡住检测、当前账号重试、每账号浏览器重启和内存清理。
+- 每个账号使用全新 Chromium 实例；账号结束后先关闭旧实例，下个账号开始时再创建，避免残留窗口和重复开窗。
 
 ## 环境要求
 
@@ -94,7 +96,7 @@ cp config.example.json config.json
 
 | 配置项 | 说明 |
 | --- | --- |
-| `email_provider` | 邮箱服务商：`duckmail`、`yyds`、`cloudflare` |
+| `email_provider` | 邮箱服务商：`duckmail`、`yyds`、`cloudflare`、`freemail`、`icloud_hme` |
 | `register_count` | 本次目标注册数量 |
 | `proxy` | 代理地址，可留空 |
 | `enable_nsfw` | 注册后是否尝试开启 NSFW |
@@ -106,6 +108,12 @@ cp config.example.json config.json
 | `cloudflare_path_token` | Cloudflare token 路径；默认 `/api/token` |
 | `cloudflare_path_messages` | Cloudflare 收件列表路径；默认 `/api/mails` |
 | `defaultDomains` | Cloudflare 临时邮箱默认域名 |
+| `freemail_api_base` | [idinging/freemail](https://github.com/idinging/freemail) Worker 地址 |
+| `freemail_jwt_token` | Freemail 部署时配置的 `JWT_TOKEN`，通过 Bearer Header 调用 API |
+| `freemail_domain` | 创建邮箱时使用的域名，支持逗号分隔多域名轮换；留空则轮换 Freemail `/api/domains` 全部域名 |
+| `icloud_hme_api_base` | [xiaozhou26/icloud-hme](https://github.com/xiaozhou26/icloud-hme) 服务地址，可填根地址或以 `/api` 结尾的地址 |
+| `icloud_hme_account_id` | icloud-hme `accounts.json` 中要使用的账号 ID，例如 `acc_1` |
+| `icloud_hme_label` | 创建 Hide My Email 别名时写入的标签 |
 | `grok2api_auto_add_local` | 是否写入本地 grok2api token 池 |
 | `grok2api_local_token_file` | 本地 grok2api token 文件路径 |
 | `grok2api_auto_add_remote` | 是否写入远端 grok2api |
@@ -116,6 +124,12 @@ cp config.example.json config.json
 | `cpa_export_enabled` | 是否在注册成功后导出 CPA xAI 凭证 |
 | `cpa_mint_async` | 是否异步 mint CPA（默认 `true`：独立浏览器 + 后台线程，不阻塞下一号注册） |
 | `cpa_probe_after_write` | 写出 CPA 文件后是否探测接口可用性 |
+| `cpa_remote_enabled` | 是否通过 CLIProxyAPI 管理 API 自动上传 CPA JSON |
+| `cpa_remote_base` | CLIProxyAPI 服务地址，例如 `https://cpa.example.com` |
+| `cpa_remote_management_key` | CLIProxyAPI 的 `remote-management.secret-key`，不是普通业务 API Key |
+| `cpa_remote_timeout_sec` | 远端上传和确认超时秒数，默认 `30` |
+| `cpa_remote_pending_dir` | 未上传或待重试目录，默认 `cpa_auths/pending` |
+| `cpa_remote_uploaded_dir` | 已被远端确认的目录，默认 `cpa_auths/uploaded` |
 | `log_level` | 日志级别：`quiet` / `info`（默认）/ `debug`；`info` 会隐藏高频 `[Debug]` |
 | `speed_log_interval_sec` | 创建速度统计间隔秒数，默认 `60`；输出类似 `成功 9/min` |
 | `browser_use_custom_ua` | 是否强制使用配置中的自定义 UA（默认 `false`，更贴近本机 Chrome） |
@@ -169,6 +183,52 @@ cp config.example.json config.json
 ```bash
 python cf_mail_debug.py --api-base "https://你的-worker-api-域名" --auth-mode x-admin-auth --api-key "你的 ADMIN_PASSWORD" --create-path /admin/new_address --domain "你的收信域名.com"
 ```
+
+### Freemail 模式
+
+本项目支持 [idinging/freemail](https://github.com/idinging/freemail) 的邮箱创建和收件接口。配置 Worker URL、部署时的 `JWT_TOKEN` 和注册域名（支持多域名）：
+
+```json
+{
+  "email_provider": "freemail",
+  "freemail_api_base": "https://你的-freemail-worker-域名",
+  "freemail_jwt_token": "你的 JWT_TOKEN",
+  "freemail_domain": "mail1.example.com,mail2.example.com"
+}
+```
+
+`freemail_domain` 支持逗号/分号分隔的多域名；每次创建邮箱会按配置顺序轮换。域名需存在于 Freemail 服务端 `MAIL_DOMAIN` / `GET /api/domains` 返回列表中。若留空，则自动轮换服务端返回的全部域名。
+
+程序会调用 `GET /api/domains` 解析域名索引，再调用 `GET /api/generate?domainIndex=...` 创建邮箱；验证码轮询使用 `GET /api/emails?mailbox=...` 和 `GET /api/email/:id`。JWT Token 仅从配置读取，不会作为单邮箱凭证写入 `mail_credentials.txt`。
+
+### iCloud Hide My Email 模式
+
+本项目支持 [xiaozhou26/icloud-hme](https://github.com/xiaozhou26/icloud-hme) 的本地 HTTP API。先按该项目文档配置 iCloud 账号、Cookie，以及用于稳定收信的 App Password，然后启动服务：
+
+```json
+{
+  "email_provider": "icloud_hme",
+  "icloud_hme_api_base": "http://127.0.0.1:8081",
+  "icloud_hme_account_id": "acc_1",
+  "icloud_hme_label": "Grok auto-register"
+}
+```
+
+程序会调用 `POST /api/create` 创建新的 Hide My Email 别名，再使用 `GET /api/inbox?account_id=...&alias=...` 轮询该别名收到的验证码邮件。`icloud_hme_api_base` 同时兼容 `http://127.0.0.1:8081` 和 `http://127.0.0.1:8081/api` 两种写法。目标服务当前没有额外的 API Token 鉴权，建议只监听本机或放在受信任网络内。
+
+### CPA 远端自动上传
+
+注册成功并生成 `cpa_auths/xai-*.json` 后，可自动上传到 CLIProxyAPI：
+
+```json
+{
+  "cpa_remote_enabled": true,
+  "cpa_remote_base": "https://你的-cliproxyapi-域名",
+  "cpa_remote_management_key": "remote-management.secret-key"
+}
+```
+
+新生成文件先写入 `cpa_auths/pending/`。上传使用官方 `POST /v0/management/auth-files` 接口，随后通过 `GET /v0/management/auth-files` 确认文件名确实存在；确认成功后移动到 `cpa_auths/uploaded/`。失败文件继续留在 `pending/`，下一次 CPA 导出开始前优先重试。关闭自动传输时文件同样保留在 `pending/`。状态保存在 `cpa_auths/.cpa_remote_upload_state.json`。
 
 ### grok2api 远端入池配置
 
@@ -300,6 +360,90 @@ GUI 数量控件可能有上限。CLI 模式直接读取 `config.json` 中的 `r
 ├── config.example.json    # 配置示例
 ├── requirements.txt       # Python 依赖
 └── README.md
+```
+
+
+
+## 分支版：Web 面板 + 内嵌 GoProxy
+
+本仓库 `feature/web-panel-goproxy` 分支在主流程基础上合并了本地 GoProxy、玻璃质感网页面板、浏览器僵尸清理、日志自动清理、测活门槛与账号池阈值自动注册。
+
+### 统一启动入口
+
+```bash
+# 启动玻璃面板（默认尝试自动启动 GoProxy）
+python run_branch.py panel
+
+# 仅面板，不自动起 GoProxy
+python run_branch.py panel --no-goproxy
+
+# 查看当前配置/账号池/浏览器摘要
+python run_branch.py status
+
+# GUI / CLI 注册
+python run_branch.py gui
+python run_branch.py cli --start --count 3
+```
+
+也可直接：
+
+```bash
+python -m panel.server
+python grok_register_ttk.py
+python grok_register_ttk.py cli
+```
+
+默认面板地址：`http://127.0.0.1:8787/`
+
+### 关键能力
+
+| 能力 | 说明 |
+| --- | --- |
+| 浏览器监控 | 观察注册/mint 浏览器实例，清理 `.browser_profiles` 僵尸进程 |
+| 内嵌 GoProxy | HTTP×2 + SOCKS×2 本地端口，5 种池模式 |
+| 代理绑定 | `goproxy_bind_register_proxy` / `goproxy_bind_cpa_proxy` 把注册与 CPA 指到本地端口 |
+| 测活门槛 | 参考 grok-inspection，测活通过后才本地保存/推送 |
+| 凭证库 | uploaded 多选/全选下载、一键删除已推送 |
+| 日志清理 | 按保留天数 + 总量配额后台巡检清理 |
+| 账号池补货 | `pool_autoreg_*`：池内账号低于阈值时自动触发注册 |
+
+### 分支配置示例
+
+```json
+{
+  "panel_enabled": true,
+  "panel_host": "127.0.0.1",
+  "panel_port": 8787,
+  "goproxy_enabled": true,
+  "goproxy_auto_start": true,
+  "goproxy_pool_mode": "mixed_equal",
+  "goproxy_endpoint": "http_random",
+  "goproxy_bind_register_proxy": true,
+  "goproxy_bind_cpa_proxy": true,
+  "live_inspect_enabled": true,
+  "success_require_live": true,
+  "log_cleanup_enabled": true,
+  "pool_autoreg_enabled": false,
+  "pool_autoreg_min_count": 5,
+  "pool_autoreg_batch": 3,
+  "pool_autoreg_interval_sec": 300
+}
+```
+
+### 面板实时同步
+
+前端通过 `/api/stream` SSE 推送 overview；断开时回退 3 秒轮询。操作（清理浏览器/日志、代理切换、凭证删除）后会立即刷新后端状态。
+
+### 基础测试
+
+```bash
+python -m unittest discover -s tests -p "test_*.py"
+```
+
+重点分支测试：
+
+```bash
+python -m unittest tests.test_run_branch tests.test_panel_server tests.test_goproxy_manager tests.test_pool_autoreg tests.test_browser_monitor_and_logs -v
 ```
 
 ## License
