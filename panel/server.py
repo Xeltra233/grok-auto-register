@@ -463,23 +463,49 @@ def _list_log_files(cfg: Optional[dict] = None, root: Optional[Path] = None) -> 
 
 
 def _resolve_log_file(file_id: str, cfg: Optional[dict] = None, root: Optional[Path] = None) -> Optional[Path]:
-    text = str(file_id or "").strip()
-    if not text or ":" not in text:
+    text = str(file_id or "").strip().replace("\\", "/")
+    if not text:
         return None
-    source, rel = text.split(":", 1)
+
+    # Accept:
+    # - register:register-latest.log
+    # - app:register-latest.log (legacy)
+    # - register-latest.log (bare name)
+    source = ""
+    rel = text
+    if ":" in text:
+        source, rel = text.split(":", 1)
+        source = str(source or "").strip().lower()
+        # legacy alias used before register-only logs tab
+        if source in ("app", "logs", "default"):
+            source = "register"
     rel = _safe_rel_name(rel)
     if not rel:
         return None
-    for root_info in _log_roots(cfg, root):
-        if root_info["id"] != source:
+
+    roots = _log_roots(cfg, root)
+    candidates = []
+    for root_info in roots:
+        if source and root_info["id"] != source:
             continue
         candidate = (root_info["dir"] / rel).resolve()
         try:
             candidate.relative_to(root_info["dir"])
         except Exception:
-            return None
+            continue
+        candidates.append(candidate)
         if candidate.is_file():
             return candidate
+
+    # Last chance: search by basename under register roots
+    base_name = Path(rel).name
+    for root_info in roots:
+        d = root_info["dir"]
+        if not d.exists():
+            continue
+        hit = d / base_name
+        if hit.is_file():
+            return hit.resolve()
     return None
 
 
@@ -1155,7 +1181,7 @@ class PanelHandler(BaseHTTPRequestHandler):
                 except Exception:
                     name = ""
                 if name:
-                    file_id = f"app:{_safe_rel_name(name)}"
+                    file_id = f"register:{_safe_rel_name(name)}"
             try:
                 lines = int((query.get("lines") or ["200"])[0] or 200)
             except Exception:

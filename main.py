@@ -19,6 +19,18 @@ if str(ROOT) not in sys.path:
 
 os.chdir(ROOT)
 
+def _ensure_logs_dir() -> None:
+    log_dir = ROOT / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    latest = log_dir / "register-latest.log"
+    if not latest.exists():
+        latest.write_text(
+            "[boot] register log ready. Start a manual registration to append runtime logs.\n",
+            encoding="utf-8",
+        )
+
+_ensure_logs_dir()
+
 
 def _config_candidates() -> list[Path]:
     env_file = (os.environ.get("GROK_CONFIG_FILE") or "").strip()

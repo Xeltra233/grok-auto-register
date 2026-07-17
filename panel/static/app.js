@@ -626,12 +626,21 @@ function fmtLogMeta(info = {}) {
   return parts.join(" · ") || "未加载";
 }
 
+function normalizeLogId(id) {
+  let s = String(id || "").trim();
+  if (!s) return "";
+  if (s.startsWith("app:")) s = "register:" + s.slice(4);
+  if (s.startsWith("logs:")) s = "register:" + s.slice(5);
+  if (!s.includes(":")) s = "register:" + s.replace(/^\/+/, "");
+  return s;
+}
+
 async function loadLogList() {
   const res = await api("/api/logs");
   state.logFiles = res.files || [];
   const sel = $("logFileSelect");
   if (!sel) return res;
-  const prev = state.selectedLogId || sel.value || "";
+  const prev = normalizeLogId(state.selectedLogId || sel.value || "");
   sel.innerHTML = "";
   if (!state.logFiles.length) {
     const opt = document.createElement("option");
@@ -657,7 +666,7 @@ async function loadLogList() {
     preferred = (regLatest || regAny || state.logFiles[0]).id;
   }
   sel.value = preferred;
-  state.selectedLogId = sel.value;
+  state.selectedLogId = normalizeLogId(sel.value);
   localStorage.setItem("grok_panel_log_id", state.selectedLogId || "");
   return res;
 }
@@ -667,7 +676,7 @@ async function refreshLogView() {
   const view = $("logView");
   const meta = $("logMeta");
   if (!sel || !view) return;
-  const id = sel.value || state.selectedLogId;
+  const id = normalizeLogId(sel.value || state.selectedLogId);
   if (!id) {
     view.textContent = "暂无日志文件。";
     if (meta) meta.textContent = "未加载";
@@ -676,7 +685,19 @@ async function refreshLogView() {
   state.selectedLogId = id;
   localStorage.setItem("grok_panel_log_id", id);
   const lines = Math.max(50, Math.min(2000, Number(($("logLines") && $("logLines").value) || 300)));
-  const res = await api(`/api/logs/tail?id=${encodeURIComponent(id)}&lines=${lines}`);
+  let res;
+  try {
+    res = await api(`/api/logs/tail?id=${encodeURIComponent(id)}&lines=${lines}`);
+  } catch (e) {
+    // stale id from older builds / empty volume: reload list once
+    await loadLogList();
+    const fallback = normalizeLogId(($("logFileSelect") && $("logFileSelect").value) || "");
+    if (fallback && fallback !== id) {
+      res = await api(`/api/logs/tail?id=${encodeURIComponent(fallback)}&lines=${lines}`);
+    } else {
+      throw e;
+    }
+  }
   view.textContent = res.content || "(空日志)";
   if (meta) meta.textContent = fmtLogMeta({ id, ...res });
   // keep stick-to-bottom for live feel
@@ -720,7 +741,7 @@ async function main() {
     catch (e) { toast(e.message, false); }
   }, "加载中...");
   if ($("logFileSelect")) $("logFileSelect").onchange = async () => {
-    state.selectedLogId = $("logFileSelect").value || "";
+    state.selectedLogId = normalizeLogId($("logFileSelect").value || "");
     localStorage.setItem("grok_panel_log_id", state.selectedLogId || "");
     try { await refreshLogView(); } catch (e) { if ($("logView")) $("logView").textContent = e.message || String(e); }
   };
