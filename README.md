@@ -128,12 +128,34 @@ docker run -d --name grok-auto-register \
 docker exec -it grok-auto-register python run_branch.py cli --start --count 1
 ```
 
+### 需要挂载的目录
+
+| 宿主机目录 | 容器内路径 | 用途 | 是否必须 |
+| --- | --- | --- | --- |
+| `./config` | `/app/config` | 主配置目录；主文件是 `config/config.json` | 必须 |
+| `./cpa_auths` | `/app/cpa_auths` | CPA 凭证落盘目录 | 建议 |
+| `./logs` | `/app/logs` | 运行日志 | 建议 |
+| `./data` | `/app/data` | 运行数据（含 GoProxy 数据等） | 建议 |
+
+说明：
+
+- 配置只挂目录，不要再挂单个 `config.json` 文件。
+- 首次部署先准备：
+
+```bash
+mkdir -p config cpa_auths logs data
+cp config/config.example.json config/config.json
+# 编辑 config/config.json
+```
+
+- `docker-compose.yml` 默认已挂载以上 4 个目录。
+- 云主机/容器平台部署时，把这 4 个路径做成持久卷即可。
+
 ### 说明
 
 - 入口文件：`main.py`（启动 Web 面板）
 - 默认监听：`0.0.0.0:8787`
-- 配置目录：挂载 `./config` → `/app/config`，主配置为 `config/config.json`
-- 建议挂载卷：`config/`、`cpa_auths/`、`logs/`、`data/`
+- 主配置文件：`/app/config/config.json`（对应宿主机 `./config/config.json`）
 - 镜像已预置 Linux GoProxy 二进制：`third_party/goproxy/bin/proxygo`（另含 `sing-box`）
 
 ### 环境变量
