@@ -253,15 +253,94 @@ def create_standalone_page(
     raise BrowserConfirmError("chromium failed to start after 3 attempts")
 
 
-def close_standalone(browser: Any) -> None:
+def _browser_pid(browser: Any) -> int | None:
+    if browser is None:
+        return None
     try:
-        browser.quit()
+        pid = getattr(browser, "process_id", None)
+        if callable(pid):
+            pid = pid()
+        if pid is not None:
+            return int(pid)
+    except Exception:
+        return None
+    return None
+
+
+def _force_kill_browser_pid(pid: int | None, log: LogFn | None = None) -> None:
+    if not pid:
+        return
+    log = log or _noop_log
+    try:
+        import psutil
+    except Exception as e:  # noqa: BLE001
+        log(f"psutil unavailable for browser kill pid={pid}: {e}")
+        return
+    try:
+        root = psutil.Process(int(pid))
+    except Exception:
+        return
+    victims = []
+    try:
+        victims.extend(root.children(recursive=True))
     except Exception:
         pass
+    victims.append(root)
+    for proc in victims:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+    try:
+        psutil.wait_procs(victims, timeout=2)
+    except Exception:
+        pass
+    log(f"force-killed browser process tree pid={pid}")
+
+
+def close_standalone(browser: Any, log: LogFn | None = None) -> None:
+    """Close a Chromium instance; force-kill residual OS processes if needed."""
+    if browser is None:
+        return
+    log = log or _noop_log
+    pid = _browser_pid(browser)
+    try:
+        _unregister_mint_browser(browser)
+    except Exception:
+        pass
+    try:
+        browser.quit(timeout=5, force=True, del_data=False)
+    except TypeError:
+        try:
+            browser.quit()
+        except Exception:
+            pass
+    except Exception as e:  # noqa: BLE001
+        log(f"browser.quit failed: {e}")
+
+    # Residual process check
+    alive = False
+    try:
+        states = getattr(browser, "states", None)
+        alive = bool(getattr(states, "is_alive", False)) if states is not None else False
+    except Exception:
+        alive = False
+    if not alive and pid:
+        try:
+            import psutil
+
+            alive = psutil.pid_exists(int(pid))
+        except Exception:
+            alive = False
+    if alive:
+        _force_kill_browser_pid(pid or _browser_pid(browser), log=log)
 
 
 # ── mint browser reuse (per-thread) ──
 _mint_tls = threading.local()
+_mint_browsers_lock = threading.Lock()
+_mint_active_browsers: set[int] = set()
+_mint_browser_objs: dict[int, Any] = {}
 
 
 def _mint_tls_get() -> dict[str, Any]:
@@ -270,6 +349,34 @@ def _mint_tls_get() -> dict[str, Any]:
         d = {"browser": None, "page": None, "served": 0, "proxy": None, "headless": None}
         _mint_tls.state = d
     return d
+
+
+def _register_mint_browser(browser: Any) -> None:
+    if browser is None:
+        return
+    key = id(browser)
+    with _mint_browsers_lock:
+        _mint_active_browsers.add(key)
+        _mint_browser_objs[key] = browser
+    try:
+        from panel.browser_monitor import register_browser
+        register_browser(browser, purpose="cpa_mint")
+    except Exception:
+        pass
+
+
+def _unregister_mint_browser(browser: Any) -> None:
+    if browser is None:
+        return
+    key = id(browser)
+    with _mint_browsers_lock:
+        _mint_active_browsers.discard(key)
+        _mint_browser_objs.pop(key, None)
+    try:
+        from panel.browser_monitor import unregister_browser
+        unregister_browser(browser)
+    except Exception:
+        pass
 
 
 def clear_page_session(page: Any, browser: Any | None = None, log: LogFn | None = None) -> None:
@@ -479,7 +586,7 @@ def acquire_mint_browser(
             return browser, page, False
         log("mint browser recycle (proxy/headless/served threshold)")
         try:
-            close_standalone(st.get("browser"))
+            close_standalone(st.get("browser"), log=log)
         except Exception:
             pass
         st["browser"] = None
@@ -487,6 +594,7 @@ def acquire_mint_browser(
         st["served"] = 0
 
     browser, page = create_standalone_page(proxy=proxy, headless=headless, log=log)
+    _register_mint_browser(browser)
     if reuse:
         st["browser"] = browser
         st["page"] = page
@@ -508,12 +616,11 @@ def release_mint_browser(
     st = _mint_tls_get()
     if force_quit or owned:
         browser = st.get("browser") if not owned else None
-        # if owned, caller passes via closing create path — handle both
+        # owned browser is closed by caller (not stored in tls)
         if owned:
-            # owned browser not in tls
             return
         if browser is not None:
-            close_standalone(browser)
+            close_standalone(browser, log=log)
         st["browser"] = None
         st["page"] = None
         st["served"] = 0
@@ -521,25 +628,35 @@ def release_mint_browser(
         return
     if success:
         st["served"] = int(st.get("served") or 0) + 1
-    else:
-        # fail: drop browser to avoid dirty state
-        if st.get("browser") is not None:
-            close_standalone(st.get("browser"))
-            st["browser"] = None
-            st["page"] = None
-            st["served"] = 0
-            log("mint browser dropped after failure")
-
-
-def shutdown_mint_browsers() -> None:
-    st = getattr(_mint_tls, "state", None)
-    if not st:
         return
+    # fail: drop browser to avoid dirty state
     if st.get("browser") is not None:
-        close_standalone(st.get("browser"))
-    st["browser"] = None
-    st["page"] = None
-    st["served"] = 0
+        close_standalone(st.get("browser"), log=log)
+        st["browser"] = None
+        st["page"] = None
+        st["served"] = 0
+        log("mint browser dropped after failure")
+
+
+def shutdown_mint_browsers(log: LogFn | None = None) -> None:
+    """Close thread-local mint browser and any other active mint browsers."""
+    log = log or _noop_log
+    st = getattr(_mint_tls, "state", None)
+    if st and st.get("browser") is not None:
+        close_standalone(st.get("browser"), log=log)
+        st["browser"] = None
+        st["page"] = None
+        st["served"] = 0
+
+    with _mint_browsers_lock:
+        leftovers = list(_mint_browser_objs.values())
+        _mint_browser_objs.clear()
+        _mint_active_browsers.clear()
+    for browser in leftovers:
+        try:
+            close_standalone(browser, log=log)
+        except Exception:
+            pass
 
 
 def _page_url(page: Any) -> str:
@@ -1332,5 +1449,10 @@ def mint_with_browser(
             except Exception:
                 pass
         if own_browser is not None:
-            close_standalone(own_browser)
-            release_mint_browser(owned=False, success=success, force_quit=True, log=log)
+            if owned:
+                # non-reuse browser: must quit here
+                close_standalone(own_browser, log=log)
+                release_mint_browser(owned=True, success=success, force_quit=False, log=log)
+            else:
+                # reused browser stays in TLS; only drop on failure / recycle
+                release_mint_browser(owned=False, success=success, force_quit=False, log=log)

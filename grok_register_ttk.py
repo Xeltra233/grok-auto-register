@@ -2554,6 +2554,11 @@ def start_browser(log_callback=None):
             try:
                 browser = Chromium(create_browser_options())
                 _set_browser(browser)
+                try:
+                    from panel.browser_monitor import register_browser
+                    register_browser(browser, purpose="register", worker_id=_get_worker_id())
+                except Exception:
+                    pass
                 page = _select_single_browser_tab(browser, log_callback=log_callback)
                 if log_callback and getattr(browser, "user_data_path", None):
                     log_callback(f"[Debug] 当前浏览器资料目录: {browser.user_data_path}")
@@ -2576,6 +2581,11 @@ def stop_browser(log_callback=None):
         _set_browser(None)
         _set_page(None)
         if browser is not None:
+            try:
+                from panel.browser_monitor import unregister_browser
+                unregister_browser(browser)
+            except Exception:
+                pass
             try:
                 profile_path = getattr(browser, "user_data_path", None)
             except Exception:
