@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
 Grok 注册机 - TTK GUI 版本
@@ -27,6 +27,21 @@ from DrissionPage import Chromium, ChromiumOptions
 from DrissionPage.errors import PageDisconnectedError
 from curl_cffi import requests
 
+try:
+    from panel.settings import (
+        PANEL_DEFAULTS,
+        apply_local_proxy_bindings,
+        normalize_branch_config,
+    )
+except Exception:  # pragma: no cover - fallback if panel package missing
+    PANEL_DEFAULTS = {}
+
+    def normalize_branch_config(cfg):
+        return cfg
+
+    def apply_local_proxy_bindings(cfg):
+        return cfg
+
 
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 MEMORY_CLEANUP_INTERVAL = 5
@@ -41,6 +56,12 @@ UI_ACTIVE_BG = "#4a6078"
 
 DEFAULT_CONFIG = {
     "duckmail_api_key": "",
+    "freemail_api_base": "",
+    "freemail_jwt_token": "",
+    "freemail_domain": "",
+    "icloud_hme_api_base": "http://127.0.0.1:8081",
+    "icloud_hme_account_id": "",
+    "icloud_hme_label": "Grok auto-register",
     "cloudflare_api_base": "",
     "cloudflare_api_key": "",
     "cloudflare_auth_mode": "none",
@@ -63,6 +84,10 @@ DEFAULT_CONFIG = {
     "cpa_proxy": "",
     "cpa_headless": False,
     "cpa_probe_after_write": True,
+    "cpa_probe_strict": False,
+    "cpa_prefer_auth_code": True,
+    "cpa_require_cli_referrer": True,
+    "cpa_allow_device_fallback": True,
     "cpa_mint_timeout_sec": 240,
     "cpa_base_url": "https://cli-chat-proxy.grok.com/v1",
     "cpa_force_standalone": False,
@@ -75,22 +100,72 @@ DEFAULT_CONFIG = {
     "cpa_server_user": "root",
     "cpa_server_password": "",
     "cpa_server_auth_dir": "",
+    "cpa_remote_enabled": False,
+    "cpa_remote_base": "",
+    "cpa_remote_management_key": "",
+    "cpa_remote_timeout_sec": 30,
+    "cpa_remote_state_file": "",
+    "cpa_remote_pending_dir": "pending",
+    "cpa_remote_uploaded_dir": "uploaded",
     "token_only_file": "",
     "concurrent_count": 1,
     "browser_restart_every": 10,
-    "cpa_probe_after_write": False,
+    "browser_shutdown_wait_sec": 4,
     "cpa_mint_async": True,
     "browser_use_custom_ua": False,
     "log_level": "info",
     "speed_log_interval_sec": 60,
+    # --- branch panel / embedded GoProxy / maintenance ---
+    "panel_enabled": True,
+    "panel_host": "127.0.0.1",
+    "panel_port": 8787,
+    "panel_auto_open": False,
+    "panel_token": "",
+    "goproxy_enabled": True,
+    "goproxy_auto_start": True,
+    "goproxy_source_dir": "third_party/goproxy",
+    "goproxy_bin_path": "",
+    "goproxy_data_dir": "data/goproxy",
+    "goproxy_workdir": "third_party/goproxy",
+    "goproxy_webui_port": 7778,
+    "goproxy_http_random_port": 7777,
+    "goproxy_http_stable_port": 7776,
+    "goproxy_socks5_random_port": 7779,
+    "goproxy_socks5_stable_port": 7780,
+    "goproxy_webui_password": "goproxy",
+    "goproxy_proxy_auth_enabled": False,
+    "goproxy_proxy_auth_username": "proxy",
+    "goproxy_proxy_auth_password": "",
+    "goproxy_blocked_countries": "CN",
+    "goproxy_allowed_countries": "",
+    "goproxy_pool_mode": "mixed_equal",
+    "goproxy_endpoint": "http_random",
+    "goproxy_bind_register_proxy": False,
+    "goproxy_bind_cpa_proxy": False,
+    "goproxy_host": "127.0.0.1",
+    "browser_monitor_enabled": True,
+    "browser_monitor_interval_sec": 15,
+    "browser_zombie_cleanup_enabled": True,
+    "log_cleanup_enabled": True,
+    "log_dir": "logs",
+    "log_retain_days": 7,
+    "log_max_total_mb": 512,
+    "log_cleanup_interval_sec": 3600,
+    "log_cleanup_globs": "*.log,*.err,live-*.log",
 }
 
 config = DEFAULT_CONFIG.copy()
 _cf_domain_index = 0
 _cf_domain_lock = threading.Lock()
+_freemail_domain_index = 0
+_freemail_domain_lock = threading.Lock()
+_freemail_domains_cache = {"base": "", "domains": [], "expires_at": 0.0}
+_freemail_domains_cache_lock = threading.Lock()
+_FREEMAIL_DOMAINS_CACHE_TTL_SEC = 60.0
 _io_lock = threading.Lock()
 _stats_lock = threading.Lock()
 _cpa_threads_lock = threading.Lock()
+_browser_lifecycle_lock = threading.RLock()
 
 _LOG_LEVEL_RANK = {
     "quiet": 10,
@@ -250,6 +325,12 @@ def load_config():
             config = {**DEFAULT_CONFIG, **loaded}
         except Exception:
             config = DEFAULT_CONFIG.copy()
+    else:
+        config = DEFAULT_CONFIG.copy()
+    # Fill branch-panel / GoProxy / cleanup defaults for old configs.
+    config = normalize_branch_config(config)
+    # Optional: bind register/CPA proxy strings to selected local GoProxy endpoint.
+    config = apply_local_proxy_bindings(config)
     return config
 
 
@@ -304,6 +385,7 @@ EXTENSION_PATH = os.path.abspath(
 
 
 DUCKMAIL_API_BASE = "https://api.duckmail.sbs"
+FREEMAIL_SHARED_CREDENTIAL = "__freemail_shared_config__"
 
 
 def get_proxies():
@@ -319,6 +401,114 @@ def get_duckmail_api_key():
 
 def get_cloudflare_api_base():
     return str(config.get("cloudflare_api_base", "") or "").rstrip("/")
+
+
+def get_freemail_api_base():
+    return str(config.get("freemail_api_base", "") or "").rstrip("/")
+
+
+def get_freemail_jwt_token():
+    return str(config.get("freemail_jwt_token", "") or "").strip()
+
+
+def parse_freemail_domains(raw=None):
+    """解析 Freemail 域名配置，支持逗号分隔的多域名。"""
+    source = config.get("freemail_domain", "") if raw is None else raw
+    domains = []
+    seen = set()
+    for item in str(source or "").replace(";", ",").split(","):
+        domain = item.strip().lower().lstrip("@")
+        if not domain or domain in seen:
+            continue
+        seen.add(domain)
+        domains.append(domain)
+    return domains
+
+
+def get_freemail_domain():
+    domains = parse_freemail_domains()
+    return domains[0] if domains else ""
+
+
+def get_freemail_domains():
+    return parse_freemail_domains()
+
+
+def freemail_next_configured_domain():
+    """按配置轮换选择 Freemail 注册域名；未配置时返回空串。"""
+    global _freemail_domain_index
+    domains = parse_freemail_domains()
+    if not domains:
+        return ""
+    with _freemail_domain_lock:
+        domain = domains[_freemail_domain_index % len(domains)]
+        _freemail_domain_index += 1
+        return domain
+
+
+def get_icloud_hme_api_base():
+    return str(config.get("icloud_hme_api_base", "") or "").strip().rstrip("/")
+
+
+def get_icloud_hme_account_id():
+    return str(config.get("icloud_hme_account_id", "") or "").strip()
+
+
+def icloud_hme_api_url(path):
+    base = get_icloud_hme_api_base()
+    if not base:
+        raise Exception("iCloud HME API Base 未配置")
+    suffix = "/" + str(path or "").strip().lstrip("/")
+    if base.lower().endswith("/api"):
+        return base + suffix
+    return base + "/api" + suffix
+
+
+def _icloud_hme_response_data(resp, operation):
+    try:
+        payload = resp.json()
+    except Exception as exc:
+        raise Exception(f"iCloud HME {operation}返回了无效 JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise Exception(f"iCloud HME {operation}响应格式错误: {payload}")
+    if payload.get("success") is False:
+        raise Exception(f"iCloud HME {operation}失败: {payload.get('message') or '未知错误'}")
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        raise Exception(f"iCloud HME {operation}响应缺少 data 字段: {payload}")
+    return data
+
+
+def icloud_hme_create_temp_address(account_id=None, label=None):
+    target_account = str(account_id or get_icloud_hme_account_id()).strip()
+    if not target_account:
+        raise Exception("iCloud HME Account ID 未配置")
+    target_label = str(
+        label if label is not None else config.get("icloud_hme_label", "Grok auto-register")
+    ).strip()
+    resp = http_post(
+        icloud_hme_api_url("create"),
+        json={"account_id": target_account, "label": target_label},
+        headers={"Accept": "application/json"},
+    )
+    data = _icloud_hme_response_data(resp, "创建别名")
+    resp.raise_for_status()
+    address = str(data.get("email") or "").strip().lower()
+    if not address or "@" not in address:
+        raise Exception(f"iCloud HME 创建别名响应缺少有效 email: {data}")
+    return address, str(data.get("account_id") or target_account)
+
+
+def freemail_build_headers(token=None):
+    credential = str(token or "").strip()
+    if not credential or credential == FREEMAIL_SHARED_CREDENTIAL:
+        credential = get_freemail_jwt_token()
+    if not credential:
+        raise Exception("Freemail JWT Token 未配置")
+    return {
+        "Authorization": f"Bearer {credential}",
+        "Accept": "application/json",
+    }
 
 
 def get_cloudflare_api_key():
@@ -422,6 +612,151 @@ def cloudflare_create_temp_address(api_base):
     if not address or not jwt:
         raise Exception(f"Cloudflare {path} 缺少 address/jwt: {data}")
     return address, jwt
+
+
+def freemail_clear_domains_cache():
+    with _freemail_domains_cache_lock:
+        _freemail_domains_cache["base"] = ""
+        _freemail_domains_cache["domains"] = []
+        _freemail_domains_cache["expires_at"] = 0.0
+
+
+def freemail_get_domains(api_base, token=None, use_cache=True):
+    """获取 Freemail 可用域名；多线程下共享短时缓存，避免并发重复请求。"""
+    base = str(api_base or "").rstrip("/")
+    now = time.time()
+    if use_cache and base:
+        with _freemail_domains_cache_lock:
+            if (
+                _freemail_domains_cache.get("base") == base
+                and _freemail_domains_cache.get("domains")
+                and float(_freemail_domains_cache.get("expires_at") or 0) > now
+            ):
+                return list(_freemail_domains_cache["domains"])
+
+    resp = http_get(f"{base}/api/domains", headers=freemail_build_headers(token))
+    resp.raise_for_status()
+    data = resp.json()
+    domains = []
+    if isinstance(data, list):
+        domains = data
+    elif isinstance(data, dict):
+        for key in ("domains", "data", "results"):
+            if isinstance(data.get(key), list):
+                domains = data[key]
+                break
+
+    if use_cache and base and domains:
+        with _freemail_domains_cache_lock:
+            _freemail_domains_cache["base"] = base
+            _freemail_domains_cache["domains"] = list(domains)
+            _freemail_domains_cache["expires_at"] = now + _FREEMAIL_DOMAINS_CACHE_TTL_SEC
+    return domains
+
+
+def _freemail_domain_value(item):
+    if isinstance(item, str):
+        return item.strip().lower().lstrip("@")
+    if isinstance(item, dict):
+        return str(item.get("domain") or item.get("name") or "").strip().lower().lstrip("@")
+    return ""
+
+
+def freemail_pick_domain_index(domains, preferred_domain=None):
+    normalized = [_freemail_domain_value(item) for item in (domains or [])]
+    if not normalized:
+        raise Exception("Freemail 没有返回可用域名")
+    preferred = str(preferred_domain or "").strip().lower().lstrip("@")
+    if not preferred:
+        return 0
+    for index, domain in enumerate(normalized):
+        if domain == preferred:
+            return index
+    available = ", ".join(domain for domain in normalized if domain)
+    raise Exception(f"Freemail 未找到配置域名 {preferred}；可用域名: {available or '无'}")
+
+
+def freemail_resolve_domain_index(api_domains, preferred_domain=None, preferred_domains=None, worker_id=None):
+    """从 Freemail /api/domains 中解析 domainIndex，支持多域名轮换与多线程安全分配。"""
+    global _freemail_domain_index
+    normalized = [_freemail_domain_value(item) for item in (api_domains or [])]
+    normalized = [item for item in normalized if item]
+    if not normalized:
+        raise Exception("Freemail 没有返回可用域名")
+
+    if preferred_domain is not None:
+        preferred = str(preferred_domain or "").strip().lower().lstrip("@")
+        if preferred:
+            return freemail_pick_domain_index(normalized, preferred_domain=preferred)
+
+    if preferred_domains is not None:
+        configured = [
+            str(item or "").strip().lower().lstrip("@")
+            for item in preferred_domains
+            if str(item or "").strip()
+        ]
+    else:
+        configured = parse_freemail_domains()
+
+    if configured:
+        available_set = set(normalized)
+        usable = [domain for domain in configured if domain in available_set]
+        if not usable:
+            available = ", ".join(normalized)
+            raise Exception(
+                "Freemail 配置域名均不可用: {configured}；可用域名: {available}".format(
+                    configured=", ".join(configured),
+                    available=available or "无",
+                )
+            )
+        rotate_list = usable
+    else:
+        # 未配置域名时，轮换服务端全部可用域名
+        rotate_list = normalized
+
+    # 只用全局原子序号轮换。不要再叠加 worker_id 偏移：
+    # concurrent=2 且 2 个域名时，(seq + wid) 会让所有 worker 永远落到同一域名。
+    with _freemail_domain_lock:
+        seq = _freemail_domain_index
+        _freemail_domain_index += 1
+
+    domain = rotate_list[seq % len(rotate_list)]
+    return freemail_pick_domain_index(normalized, preferred_domain=domain)
+
+
+def freemail_create_temp_address(api_base=None, token=None, preferred_domain=None, preferred_domains=None, worker_id=None, log_callback=None):
+    base = str(api_base or get_freemail_api_base()).rstrip("/")
+    if not base:
+        raise Exception("Freemail API Base 未配置")
+    headers = freemail_build_headers(token)
+    domains = freemail_get_domains(base, token=token, use_cache=True)
+    domain_index = freemail_resolve_domain_index(
+        domains,
+        preferred_domain=preferred_domain,
+        preferred_domains=preferred_domains,
+        worker_id=worker_id,
+    )
+    picked = ""
+    try:
+        picked = _freemail_domain_value(domains[domain_index]) if 0 <= domain_index < len(domains) else ""
+    except Exception:
+        picked = ""
+    resp = http_get(
+        f"{base}/api/generate",
+        headers=headers,
+        params={"length": 10, "domainIndex": domain_index},
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if isinstance(data, dict) and isinstance(data.get("data"), dict):
+        data = data["data"]
+    address = data.get("email") or data.get("address") if isinstance(data, dict) else ""
+    if not address:
+        raise Exception(f"Freemail /api/generate 缺少 email 字段: {data}")
+    address = str(address)
+    if log_callback:
+        log_callback(f"[*] Freemail 域名轮换: index={domain_index} domain={picked or '?'} -> {address}")
+    return address, FREEMAIL_SHARED_CREDENTIAL
 
 
 def get_user_agent():
@@ -1136,10 +1471,14 @@ def get_email_provider():
     return config.get("email_provider", "duckmail")
 
 
-def get_email_and_token(api_key=None):
+def get_email_and_token(api_key=None, log_callback=None):
     provider = get_email_provider()
     if provider == "yyds":
         return yyds_get_email_and_token(api_key=api_key, jwt=get_yyds_jwt())
+    if provider == "freemail":
+        return freemail_create_temp_address(log_callback=log_callback)
+    if provider in ("icloud_hme", "icloud-hme"):
+        return icloud_hme_create_temp_address()
     if provider == "cloudflare":
         api_base = get_cloudflare_api_base()
         if not api_base:
@@ -1199,6 +1538,26 @@ def get_oai_code(
             log_callback=log_callback,
             jwt=get_yyds_jwt(),
             cancel_callback=cancel_callback,
+        )
+    if provider == "freemail":
+        return freemail_get_oai_code(
+            dev_token,
+            email,
+            timeout=timeout,
+            poll_interval=poll_interval,
+            log_callback=log_callback,
+            cancel_callback=cancel_callback,
+            resend_callback=resend_callback,
+        )
+    if provider in ("icloud_hme", "icloud-hme"):
+        return icloud_hme_get_oai_code(
+            dev_token,
+            email,
+            timeout=timeout,
+            poll_interval=poll_interval,
+            log_callback=log_callback,
+            cancel_callback=cancel_callback,
+            resend_callback=resend_callback,
         )
     if provider == "cloudflare":
         return cloudflare_get_oai_code(
@@ -1291,6 +1650,197 @@ def duckmail_get_oai_code(
                 return code
         sleep_with_cancel(poll_interval, cancel_callback)
     raise Exception(f"在 {timeout}s 内未收到验证码邮件")
+
+
+def freemail_get_messages(api_base, token, email):
+    resp = http_get(
+        f"{api_base}/api/emails",
+        headers=freemail_build_headers(token),
+        params={"mailbox": email, "limit": 20},
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if isinstance(data, list):
+        return data
+    return _pick_list_payload(data)
+
+
+def freemail_get_message_detail(api_base, token, message_id):
+    resp = http_get(
+        f"{api_base}/api/email/{message_id}",
+        headers=freemail_build_headers(token),
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if isinstance(data, dict) and isinstance(data.get("data"), dict):
+        return data["data"]
+    return data if isinstance(data, dict) else {}
+
+
+def freemail_get_oai_code(
+    dev_token,
+    email,
+    timeout=180,
+    poll_interval=3,
+    log_callback=None,
+    cancel_callback=None,
+    resend_callback=None,
+):
+    api_base = get_freemail_api_base()
+    if not api_base:
+        raise Exception("Freemail API Base 未配置")
+    deadline = time.time() + timeout
+    seen_attempts = {}
+    next_resend_at = time.time() + 35
+    while time.time() < deadline:
+        raise_if_cancelled(cancel_callback)
+        if resend_callback and time.time() >= next_resend_at:
+            try:
+                resend_callback()
+                if log_callback:
+                    log_callback("[*] 已触发重新发送验证码")
+            except Exception as exc:
+                if log_callback:
+                    log_callback(f"[Debug] 触发重发验证码失败: {exc}")
+            next_resend_at = time.time() + 35
+        try:
+            messages = freemail_get_messages(api_base, dev_token, email)
+        except Exception as exc:
+            if log_callback:
+                log_callback(f"[Debug] Freemail 拉取邮件列表失败: {exc}")
+            sleep_with_cancel(poll_interval, cancel_callback)
+            continue
+        if log_callback:
+            log_callback(f"[Debug] Freemail 本轮邮件数量: {len(messages)}")
+        for msg in messages:
+            msg_id = msg.get("id") or msg.get("message_id")
+            if not msg_id:
+                continue
+            attempt = int(seen_attempts.get(msg_id, 0))
+            if attempt >= 5:
+                continue
+            seen_attempts[msg_id] = attempt + 1
+            subject = str(msg.get("subject") or "")
+            explicit_code = str(msg.get("verification_code") or "").strip()
+            if re.fullmatch(r"(?:[A-Z0-9]{3}-[A-Z0-9]{3}|\d{4,8})", explicit_code, re.IGNORECASE):
+                if log_callback:
+                    log_callback(f"[*] Freemail 从邮件元数据提取到验证码: {explicit_code}")
+                return explicit_code
+            parts = []
+            for field in ("preview", "content", "text", "body", "snippet"):
+                value = msg.get(field)
+                if isinstance(value, str) and value.strip():
+                    parts.append(value)
+            try:
+                detail = freemail_get_message_detail(api_base, dev_token, msg_id)
+                explicit_code = str(detail.get("verification_code") or "").strip()
+                if re.fullmatch(r"(?:[A-Z0-9]{3}-[A-Z0-9]{3}|\d{4,8})", explicit_code, re.IGNORECASE):
+                    if log_callback:
+                        log_callback(f"[*] Freemail 从邮件详情提取到验证码: {explicit_code}")
+                    return explicit_code
+                for field in ("content", "text", "body", "preview", "snippet"):
+                    value = detail.get(field)
+                    if isinstance(value, str) and value.strip():
+                        parts.append(value)
+                html_value = detail.get("html_content") or detail.get("html") or ""
+                if isinstance(html_value, list):
+                    html_value = "\n".join(str(item) for item in html_value)
+                if isinstance(html_value, str) and html_value.strip():
+                    parts.append(re.sub(r"<[^>]+>", " ", html_value))
+                if not subject:
+                    subject = str(detail.get("subject") or "")
+            except Exception as exc:
+                if log_callback:
+                    log_callback(f"[Debug] Freemail 邮件详情读取失败，改用列表内容解析: {exc}")
+            code = extract_verification_code("\n".join(parts), subject)
+            if code:
+                if log_callback:
+                    log_callback(f"[*] Freemail 从邮件正文提取到验证码: {code}")
+                return code
+        sleep_with_cancel(poll_interval, cancel_callback)
+    raise Exception(f"Freemail 在 {timeout}s 内未收到验证码邮件")
+
+
+def icloud_hme_get_messages(account_id, email, limit=20, days=7):
+    target_account = str(account_id or get_icloud_hme_account_id()).strip()
+    if not target_account:
+        raise Exception("iCloud HME Account ID 未配置")
+    resp = http_get(
+        icloud_hme_api_url("inbox"),
+        headers={"Accept": "application/json"},
+        params={
+            "account_id": target_account,
+            "alias": email,
+            "limit": int(limit),
+            "days": int(days),
+        },
+        timeout=35,
+    )
+    data = _icloud_hme_response_data(resp, "读取收件箱")
+    resp.raise_for_status()
+    messages = data.get("messages")
+    if messages is None:
+        return []
+    if not isinstance(messages, list):
+        raise Exception(f"iCloud HME 收件箱 messages 字段格式错误: {data}")
+    return messages
+
+
+def icloud_hme_get_oai_code(
+    dev_token,
+    email,
+    timeout=180,
+    poll_interval=3,
+    log_callback=None,
+    cancel_callback=None,
+    resend_callback=None,
+):
+    account_id = str(dev_token or get_icloud_hme_account_id()).strip()
+    deadline = time.time() + timeout
+    seen_attempts = {}
+    next_resend_at = time.time() + 35
+    while time.time() < deadline:
+        raise_if_cancelled(cancel_callback)
+        if resend_callback and time.time() >= next_resend_at:
+            try:
+                resend_callback()
+                if log_callback:
+                    log_callback("[*] 已触发重新发送验证码")
+            except Exception as exc:
+                if log_callback:
+                    log_callback(f"[Debug] 触发重发验证码失败: {exc}")
+            next_resend_at = time.time() + 35
+        try:
+            messages = icloud_hme_get_messages(account_id, email)
+        except Exception as exc:
+            if log_callback:
+                log_callback(f"[Debug] iCloud HME 拉取邮件失败: {exc}")
+            sleep_with_cancel(poll_interval, cancel_callback)
+            continue
+        if log_callback:
+            log_callback(f"[Debug] iCloud HME 本轮邮件数量: {len(messages)}")
+        for msg in messages:
+            if not isinstance(msg, dict):
+                continue
+            msg_id = str(msg.get("id") or "").strip()
+            attempt = int(seen_attempts.get(msg_id, 0)) if msg_id else 0
+            if msg_id and attempt >= 5:
+                continue
+            if msg_id:
+                seen_attempts[msg_id] = attempt + 1
+            subject = str(msg.get("subject") or "")
+            parts = []
+            for field in ("preview", "body", "content", "text", "snippet", "from", "to"):
+                value = msg.get(field)
+                if isinstance(value, str) and value.strip():
+                    parts.append(value)
+            code = extract_verification_code("\n".join(parts), subject)
+            if code:
+                if log_callback:
+                    log_callback(f"[*] iCloud HME 从邮件中提取到验证码: {code}")
+                return code
+        sleep_with_cancel(poll_interval, cancel_callback)
+    raise Exception(f"iCloud HME 在 {timeout}s 内未收到验证码邮件")
 
 
 def cloudflare_get_oai_code(
@@ -1742,64 +2292,208 @@ def tk_option_menu(parent, variable, values, width=12):
     return menu
 
 
-def start_browser(log_callback=None):
-    last_exc = None
-    for attempt in range(1, 5):
+def _browser_process_id(browser):
+    """Best-effort Chromium root PID from DrissionPage."""
+    if browser is None:
+        return None
+    try:
+        pid = getattr(browser, "process_id", None)
+        if callable(pid):
+            pid = pid()
+        if pid is not None:
+            return int(pid)
+    except Exception:
+        pass
+    return None
+
+
+def _pid_is_running(pid):
+    if not pid:
+        return False
+    try:
+        import psutil
+
+        return psutil.pid_exists(int(pid))
+    except Exception:
+        return False
+
+
+def _force_kill_pid_tree(pid, log_callback=None):
+    """Kill a browser PID and its descendants. Returns True if a kill was attempted."""
+    if not pid:
+        return False
+    try:
+        import psutil
+    except Exception as exc:
+        if log_callback:
+            log_callback(f"[Debug] psutil unavailable, skip force-kill pid={pid}: {exc}")
+        return False
+
+    try:
+        root = psutil.Process(int(pid))
+    except Exception:
+        return False
+
+    victims = []
+    try:
+        victims.extend(root.children(recursive=True))
+    except Exception:
+        pass
+    victims.append(root)
+
+    killed = False
+    for proc in victims:
         try:
-            _set_browser(Chromium(create_browser_options()))
-            tabs = _get_browser().get_tabs()
-            _set_page(tabs[-1] if tabs else _get_browser().new_tab())
-            if log_callback and getattr(_get_browser(), "user_data_path", None):
-                log_callback(f"[Debug] 当前浏览器资料目录: {_get_browser().user_data_path}")
-            if log_callback and attempt > 1:
-                log_callback(f"[*] 浏览器第 {attempt} 次启动成功")
-            return _get_browser(), _get_page()
+            proc.kill()
+            killed = True
+        except Exception:
+            pass
+
+    try:
+        psutil.wait_procs(victims, timeout=2)
+    except Exception:
+        pass
+
+    if killed and log_callback:
+        log_callback(f"[Debug] force-killed browser process tree pid={pid}")
+    return killed
+
+
+def _quit_browser_instance(browser, log_callback=None, del_data=True):
+    """Graceful quit first, then force-kill residual Chromium processes."""
+    if browser is None:
+        return
+
+    wait_sec = max(float(config.get("browser_shutdown_wait_sec", 4) or 4), 0)
+    pid = _browser_process_id(browser)
+
+    try:
+        # DrissionPage: force=True uses SystemInfo PIDs after Browser.close
+        browser.quit(timeout=max(wait_sec, 1.0), force=True, del_data=bool(del_data))
+    except TypeError:
+        try:
+            browser.quit(del_data=bool(del_data))
         except Exception as exc:
-            last_exc = exc
             if log_callback:
-                log_callback(f"[Debug] 浏览器启动失败(第{attempt}/4次): {exc}")
+                log_callback(f"[Debug] browser.quit failed: {exc}")
+    except Exception as exc:
+        if log_callback:
+            log_callback(f"[Debug] browser.quit failed: {exc}")
+
+    deadline = time.time() + wait_sec
+    while (_browser_is_alive(browser) or _pid_is_running(pid)) and time.time() < deadline:
+        time.sleep(0.1)
+
+    still_alive = _browser_is_alive(browser) or _pid_is_running(pid)
+    if still_alive:
+        # quit() may clear process_id; keep the pre-quit PID for the hard kill.
+        kill_pid = pid or _browser_process_id(browser)
+        if kill_pid:
+            if log_callback:
+                log_callback(f"[!] browser still alive, force-kill pid={kill_pid}")
+            _force_kill_pid_tree(kill_pid, log_callback=log_callback)
+        elif log_callback:
+            log_callback("[!] browser still alive, but process pid is unavailable")
+
+
+def _browser_is_alive(browser):
+    if browser is None:
+        return False
+    try:
+        states = getattr(browser, "states", None)
+        alive = getattr(states, "is_alive", None) if states is not None else None
+        if alive is not None:
+            return bool(alive)
+    except Exception:
+        pass
+    try:
+        browser.get_tabs()
+        return True
+    except Exception:
+        return False
+
+
+def _select_single_browser_tab(browser, log_callback=None):
+    tabs = list(browser.get_tabs() or [])
+    page = tabs[-1] if tabs else browser.new_tab()
+    closed = 0
+    for tab in tabs[:-1]:
+        try:
+            tab.close()
+            closed += 1
+        except Exception:
+            pass
+    _set_page(page)
+    if closed and log_callback:
+        log_callback(f"[Debug] 已关闭 {closed} 个多余浏览器标签页")
+    return page
+
+
+def start_browser(log_callback=None):
+    with _browser_lifecycle_lock:
+        existing = _get_browser()
+        if existing is not None:
+            if log_callback:
+                log_callback("[Debug] 启动前检测到旧浏览器实例，先关闭确认退出，再创建全新实例")
+            stop_browser(log_callback=log_callback)
+
+        last_exc = None
+        for attempt in range(1, 5):
             try:
-                if _get_browser() is not None:
-                    _get_browser().quit(del_data=True)
+                browser = Chromium(create_browser_options())
+                _set_browser(browser)
+                page = _select_single_browser_tab(browser, log_callback=log_callback)
+                if log_callback and getattr(browser, "user_data_path", None):
+                    log_callback(f"[Debug] 当前浏览器资料目录: {browser.user_data_path}")
+                if log_callback and attempt > 1:
+                    log_callback(f"[*] 浏览器第 {attempt} 次启动成功")
+                return browser, page
+            except Exception as exc:
+                last_exc = exc
+                if log_callback:
+                    log_callback(f"[Debug] 浏览器启动失败(第{attempt}/4次): {exc}")
+                stop_browser(log_callback=log_callback)
+                time.sleep(min(1.5 * attempt, 4))
+        raise Exception(f"浏览器启动失败，已重试4次: {last_exc}")
+
+
+def stop_browser(log_callback=None):
+    with _browser_lifecycle_lock:
+        profile_path = None
+        browser = _get_browser()
+        _set_browser(None)
+        _set_page(None)
+        if browser is not None:
+            try:
+                profile_path = getattr(browser, "user_data_path", None)
+            except Exception:
+                profile_path = None
+            _quit_browser_instance(browser, log_callback=log_callback, del_data=True)
+        if profile_path:
+            try:
+                import shutil
+
+                root = os.path.abspath(
+                    os.path.join(os.path.dirname(os.path.abspath(__file__)), ".browser_profiles")
+                )
+                abs_profile = os.path.abspath(str(profile_path))
+                if abs_profile.startswith(root) and os.path.isdir(abs_profile):
+                    shutil.rmtree(abs_profile, ignore_errors=True)
             except Exception:
                 pass
-            _set_browser(None)
-            _set_page(None)
-            time.sleep(min(1.5 * attempt, 4))
-    raise Exception(f"浏览器启动失败，已重试4次: {last_exc}")
-
-
-def stop_browser():
-    profile_path = None
-    browser = _get_browser()
-    if browser is not None:
-        try:
-            profile_path = getattr(browser, "user_data_path", None)
-        except Exception:
-            profile_path = None
-        try:
-            browser.quit(del_data=True)
-        except Exception:
-            pass
-    _set_browser(None)
-    _set_page(None)
-    if profile_path:
-        try:
-            import shutil
-
-            root = os.path.abspath(
-                os.path.join(os.path.dirname(os.path.abspath(__file__)), ".browser_profiles")
-            )
-            abs_profile = os.path.abspath(str(profile_path))
-            if abs_profile.startswith(root) and os.path.isdir(abs_profile):
-                shutil.rmtree(abs_profile, ignore_errors=True)
-        except Exception:
-            pass
 
 
 def restart_browser(log_callback=None):
-    stop_browser()
-    return start_browser(log_callback=log_callback)
+    with _browser_lifecycle_lock:
+        stop_browser(log_callback=log_callback)
+        return start_browser(log_callback=log_callback)
+
+
+def _close_browser_after_attempt(log_callback=None, attempts=0, restart_every=0, label=""):
+    if restart_every > 0 and attempts > 0 and attempts % restart_every == 0 and log_callback:
+        prefix = f"{label} " if label else ""
+        log_callback(f"[*] {prefix}已处理 {attempts} 个账号，关闭旧实例；下个账号将新建浏览器")
+    return stop_browser(log_callback=log_callback)
 
 
 def prepare_clean_browser_session(log_callback=None, cancel_callback=None):
@@ -1899,6 +2593,13 @@ def cleanup_runtime_memory(log_callback=None, reason="定期清理"):
     if log_callback:
         log_callback(f"[*] {reason}: 关闭浏览器并清理内存")
     stop_browser()
+    try:
+        from cpa_xai.browser_confirm import shutdown_mint_browsers
+
+        shutdown_mint_browsers()
+    except Exception as exc:
+        if log_callback:
+            log_callback(f"[Debug] mint browser cleanup failed: {exc}")
     collected = gc.collect()
     if log_callback:
         log_callback(f"[*] Python GC 已回收对象数: {collected}")
@@ -2164,8 +2865,7 @@ def open_signup_page(log_callback=None, cancel_callback=None):
                 start_browser(log_callback=log_callback)
                 browser = _get_browser()
             try:
-                tabs = browser.get_tabs()
-                _set_page(tabs[0] if tabs else browser.new_tab())
+                _select_single_browser_tab(browser, log_callback=log_callback)
             except Exception:
                 _set_page(browser.new_tab())
             _get_page().get(SIGNUP_URL)
@@ -2241,7 +2941,7 @@ return !!(givenInput && familyInput && passwordInput);
 
 def fill_email_and_submit(timeout=45, log_callback=None, cancel_callback=None):
     raise_if_cancelled(cancel_callback)
-    email, dev_token = get_email_and_token()
+    email, dev_token = get_email_and_token(log_callback=log_callback)
     if not email or not dev_token:
         raise Exception("获取邮箱失败")
     if log_callback:
@@ -2477,9 +3177,17 @@ return 'enter';
 
 
 def fill_code_and_submit(email, dev_token, timeout=180, log_callback=None, cancel_callback=None):
+    """填写邮箱验证码并提交。
+
+    键入逻辑对齐 https://github.com/Git-creat7/grokRegister-cpa ：
+    用 React 友好的 JS setInputValue 整段/分位写入。
+    额外要求：写入后必须与完整验证码一致才提交，避免“少 2 位也当成功”。
+    """
+
     def _resend_code():
-        _get_page().run_js(
-            r"""
+        try:
+            _get_page().run_js(
+                r"""
 const nodes = Array.from(document.querySelectorAll('button, a, [role="button"]'));
 const target = nodes.find((node) => {
   const t = (node.innerText || node.textContent || '').replace(/\s+/g, '').toLowerCase();
@@ -2487,8 +3195,10 @@ const target = nodes.find((node) => {
 });
 if (target && !target.disabled) { target.click(); return true; }
 return false;
-            """
-        )
+                """
+            )
+        except Exception:
+            return False
 
     code = get_oai_code(
         dev_token,
@@ -2501,6 +3211,7 @@ return false;
         raise Exception("获取验证码失败")
     clean_code = str(code).replace("-", "").strip()
     deadline = time.time() + timeout
+    last_fail_log = 0.0
 
     while time.time() < deadline:
         raise_if_cancelled(cancel_callback)
@@ -2517,47 +3228,77 @@ function isVisible(node) {
     return rect.width > 0 && rect.height > 0;
 }
 
-function setInputValue(input, value) {
-    const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
-    const tracker = input._valueTracker;
-    if (tracker) tracker.setValue('');
-    if (nativeSetter) nativeSetter.call(input, value);
-    else input.value = value;
-    input.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, data: value, inputType: 'insertText' }));
-    input.dispatchEvent(new InputEvent('input', { bubbles: true, data: value, inputType: 'insertText' }));
-    input.dispatchEvent(new Event('change', { bubbles: true }));
+function sortByPos(nodes) {
+    return nodes.slice().sort((a, b) => {
+        const ra = a.getBoundingClientRect();
+        const rb = b.getBoundingClientRect();
+        if (Math.abs(ra.top - rb.top) > 8) return ra.top - rb.top;
+        return ra.left - rb.left;
+    });
 }
 
+function setInputValue(input, value) {
+    if (!input) return false;
+    input.focus();
+    try { input.click(); } catch (e) {}
+    const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+    const tracker = input._valueTracker;
+    const prev = String(input.value || '');
+    if (tracker) tracker.setValue(prev);
+    if (nativeSetter) nativeSetter.call(input, value);
+    else input.value = value;
+    try {
+        input.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, data: value, inputType: 'insertText' }));
+    } catch (e) {}
+    try {
+        input.dispatchEvent(new InputEvent('input', { bubbles: true, data: value, inputType: 'insertText' }));
+    } catch (e) {
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    return String(input.value || '') === String(value || '');
+}
+
+function norm(v) { return String(v || '').replace(/[\s\-]/g, ''); }
+
 const aggregate = Array.from(document.querySelectorAll(
-  'input[data-input-otp=\"true\"], input[name=\"code\"], input[autocomplete=\"one-time-code\"], input[inputmode=\"numeric\"], input[inputmode=\"text\"]'
+  'input[data-input-otp="true"], input[name="code"], input[name="otp"], input[autocomplete="one-time-code"], input[inputmode="numeric"], input[inputmode="text"]'
 )).find((node) => isVisible(node) && !node.disabled && !node.readOnly && Number(node.maxLength || 6) > 1);
 
 if (aggregate) {
     aggregate.focus();
-    aggregate.click();
+    try { aggregate.click(); } catch (e) {}
+    try { aggregate.select(); } catch (e) {}
     setInputValue(aggregate, code);
-    return String(aggregate.value || '').replace(/\\s+/g, '') ? 'filled-aggregate' : 'aggregate-failed';
+    const actual = norm(aggregate.value);
+    if (actual === code) return 'filled-aggregate';
+    return 'aggregate-failed:' + actual;
 }
 
-const otpBoxes = Array.from(document.querySelectorAll('input')).filter((node) => {
+const otpBoxes = sortByPos(Array.from(document.querySelectorAll('input')).filter((node) => {
     if (!isVisible(node) || node.disabled || node.readOnly) return false;
     const maxLength = Number(node.maxLength || 0);
     const ac = String(node.autocomplete || '').toLowerCase();
-    return maxLength === 1 || ac === 'one-time-code';
-});
+    const inputMode = String(node.getAttribute('inputmode') || '').toLowerCase();
+    return maxLength === 1 || ac === 'one-time-code' || (inputMode === 'numeric' && maxLength === 1);
+}));
 
 if (otpBoxes.length >= code.length) {
     for (let i = 0; i < code.length; i += 1) {
         const ch = code[i] || '';
         const box = otpBoxes[i];
         box.focus();
-        box.click();
+        try { box.click(); } catch (e) {}
         setInputValue(box, ch);
-        box.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: ch }));
-        box.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: ch }));
+        try {
+            box.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: ch }));
+            box.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: ch }));
+        } catch (e) {}
     }
     const merged = otpBoxes.slice(0, code.length).map((x) => String(x.value || '').trim()).join('');
-    return merged.length ? 'filled-boxes' : 'boxes-failed';
+    const actual = norm(merged);
+    if (actual === code) return 'filled-boxes';
+    return 'boxes-failed:' + actual;
 }
 
 return 'not-ready';
@@ -2565,13 +3306,21 @@ return 'not-ready';
             clean_code,
         )
 
-        if filled == "not-ready":
+        if filled == "not-ready" or filled == "empty-code":
             sleep_with_cancel(0.5, cancel_callback)
             continue
-        if "failed" in str(filled):
-            if log_callback:
-                log_callback(f"[Debug] 验证码填写失败: {filled}")
+
+        filled_s = str(filled or "")
+        if "failed" in filled_s:
+            now = time.time()
+            if log_callback and now - last_fail_log >= 2:
+                last_fail_log = now
+                log_callback(f"[Debug] 验证码填写失败: {filled_s}")
             sleep_with_cancel(0.5, cancel_callback)
+            continue
+
+        if filled_s not in ("filled-aggregate", "filled-boxes"):
+            sleep_with_cancel(0.4, cancel_callback)
             continue
 
         clicked = _get_page().run_js(
@@ -2584,19 +3333,20 @@ function isVisible(node) {
     return rect.width > 0 && rect.height > 0;
 }
 
-const buttons = Array.from(document.querySelectorAll('button[type=\"submit\"], button')).filter((node) => {
+const buttons = Array.from(document.querySelectorAll('button[type="submit"], button, [role="button"]')).filter((node) => {
     return isVisible(node) && !node.disabled && node.getAttribute('aria-disabled') !== 'true';
 });
 
 const btn = buttons.find((node) => {
-    const t = (node.innerText || node.textContent || '').replace(/\\s+/g, '').toLowerCase();
+    const t = (node.innerText || node.textContent || '').replace(/\s+/g, '').toLowerCase();
     return (
         t.includes('确认邮箱') ||
         t.includes('继续') ||
         t.includes('下一步') ||
         t.includes('confirm') ||
         t.includes('continue') ||
-        t.includes('next')
+        t.includes('next') ||
+        t.includes('verify')
     );
 });
 
@@ -2607,15 +3357,16 @@ return 'clicked';
             """
         )
 
-        if clicked == "clicked" or clicked == "no-button":
+        if clicked in ("clicked", "no-button"):
             if log_callback:
-                log_callback(f"[*] 已填写验证码并提交: {code}")
+                log_callback(f"[*] 已填写验证码并提交: {code} ({filled_s}, click={clicked})")
             sleep_with_cancel(1.5, cancel_callback)
             return code
 
         sleep_with_cancel(0.5, cancel_callback)
 
     raise Exception("验证码已获取，但自动填写/提交失败")
+
 
 
 def getTurnstileToken(log_callback=None, cancel_callback=None):
@@ -2723,14 +3474,130 @@ def build_profile():
 
 
 def fill_profile_and_submit(timeout=120, log_callback=None, cancel_callback=None):
+    """填写姓名/密码并提交。
+
+    键入逻辑对齐 https://github.com/Git-creat7/grokRegister-cpa 的 setInputValue。
+    额外：
+    - JS 写入失败时，回退 DrissionPage 真实 CDP 键入（Input.insertText）
+    - 提交前复查字段，被页面清掉则重新填写，避免 form_filled_once 卡死空表
+    """
     given_name, family_name, password = build_profile()
     deadline = time.time() + timeout
     form_filled_once = False
     wait_cf_since = None
     last_cf_retry_at = 0.0
 
+    def _profile_values_ok():
+        try:
+            return bool(
+                _get_page().run_js(
+                    """
+const givenName = String(arguments[0] || '');
+const familyName = String(arguments[1] || '');
+const password = String(arguments[2] || '');
+function isVisible(node) {
+  if (!node) return false;
+  const style = window.getComputedStyle(node);
+  if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+  const rect = node.getBoundingClientRect();
+  return rect.width > 0 && rect.height > 0;
+}
+function pick(selector) {
+  return Array.from(document.querySelectorAll(selector)).find((n) => isVisible(n) && !n.disabled) || null;
+}
+const g = pick('input[data-testid="givenName"], input[name="givenName"], input[autocomplete="given-name"], input[aria-label*="名"]');
+const f = pick('input[data-testid="familyName"], input[name="familyName"], input[autocomplete="family-name"], input[aria-label*="姓"]');
+const p = pick('input[data-testid="password"], input[name="password"], input[type="password"], input[autocomplete="new-password"]');
+if (!g || !f || !p) return false;
+return (
+  String(g.value || '').trim() === givenName &&
+  String(f.value || '').trim() === familyName &&
+  String(p.value || '') === password
+);
+                    """,
+                    given_name,
+                    family_name,
+                    password,
+                )
+            )
+        except Exception:
+            return False
+
+    def _fill_profile_cdp():
+        """真实键入回退：click + clear + Input.insertText。"""
+        page = _get_page()
+        selectors = [
+            (
+                [
+                    'input[data-testid="givenName"]',
+                    'input[name="givenName"]',
+                    'input[autocomplete="given-name"]',
+                ],
+                given_name,
+            ),
+            (
+                [
+                    'input[data-testid="familyName"]',
+                    'input[name="familyName"]',
+                    'input[autocomplete="family-name"]',
+                ],
+                family_name,
+            ),
+            (
+                [
+                    'input[data-testid="password"]',
+                    'input[name="password"]',
+                    'input[type="password"]',
+                ],
+                password,
+            ),
+        ]
+        ok_count = 0
+        for candidates, value in selectors:
+            ele = None
+            for part in candidates:
+                try:
+                    ele = page.ele(f"css:{part}", timeout=0.6)
+                except Exception:
+                    ele = None
+                if ele is not None:
+                    break
+            if ele is None:
+                continue
+            try:
+                ele.click()
+            except Exception:
+                pass
+            try:
+                ele.clear(by_js=False)
+            except Exception:
+                try:
+                    ele.clear()
+                except Exception:
+                    pass
+            typed = False
+            try:
+                ele.input(str(value), clear=False, by_js=False)
+                typed = True
+            except Exception:
+                try:
+                    page.actions.input(str(value))
+                    typed = True
+                except Exception:
+                    typed = False
+            if typed:
+                ok_count += 1
+            sleep_with_cancel(0.08, cancel_callback)
+        return ok_count >= 3
+
     while time.time() < deadline:
         raise_if_cancelled(cancel_callback)
+
+        if form_filled_once and not _profile_values_ok():
+            if log_callback:
+                log_callback("[Debug] 资料字段被清空，重新填写...")
+            form_filled_once = False
+
         if not form_filled_once:
             filled = _get_page().run_js(
                 """
@@ -2758,11 +3625,18 @@ function setInputValue(input, value) {
     input.click();
     const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
     const tracker = input._valueTracker;
-    if (tracker) tracker.setValue('');
+    const prev = String(input.value || '');
+    if (tracker) tracker.setValue(prev);
     if (nativeSetter) nativeSetter.call(input, value);
     else input.value = value;
-    input.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, data: value, inputType: 'insertText' }));
-    input.dispatchEvent(new InputEvent('input', { bubbles: true, data: value, inputType: 'insertText' }));
+    try {
+        input.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, data: value, inputType: 'insertText' }));
+    } catch (e) {}
+    try {
+        input.dispatchEvent(new InputEvent('input', { bubbles: true, data: value, inputType: 'insertText' }));
+    } catch (e) {
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+    }
     input.dispatchEvent(new Event('change', { bubbles: true }));
     input.blur();
     return String(input.value || '').trim() === String(value || '').trim();
@@ -2778,7 +3652,7 @@ const ok1 = setInputValue(givenInput, givenName);
 const ok2 = setInputValue(familyInput, familyName);
 const ok3 = setInputValue(passwordInput, password);
 
-if (!ok1 || !ok2 || !ok3) return 'fill-failed';
+if (!ok1 || !ok2 || !ok3) return 'fill-failed:' + [ok1, ok2, ok3].join(',');
 
 const buttons = Array.from(document.querySelectorAll('button[type="submit"], button, [role="button"], input[type="submit"]')).filter((node) => {
     return isVisible(node) && !node.disabled && node.getAttribute('aria-disabled') !== 'true';
@@ -2788,7 +3662,6 @@ const submitBtn = buttons.find((node) => {
     return t.includes('完成注册') || t.includes('创建账户') || t.includes('signup') || t.includes('createaccount');
 });
 
-// 必须等待 Cloudflare 校验通过后再提交
 const cfInput = document.querySelector('input[name="cf-turnstile-response"]');
 const cfPresent = !!cfInput
   || !!document.querySelector('iframe[src*="turnstile"], div.cf-turnstile, [data-sitekey], script[src*="turnstile"]');
@@ -2802,11 +3675,22 @@ if (submitBtn) {
     return 'ready-to-submit';
 }
 return 'filled-no-submit';
-            """,
+                """,
                 given_name,
                 family_name,
                 password,
             )
+
+            filled_s = str(filled or "")
+            if filled_s.startswith("fill-failed"):
+                if log_callback:
+                    log_callback(f"[Debug] 资料 JS 写入失败({filled_s})，改用真实键入回退...")
+                if _fill_profile_cdp() and _profile_values_ok():
+                    filled = "ready-to-submit"
+                    filled_s = filled
+                else:
+                    sleep_with_cancel(0.5, cancel_callback)
+                    continue
 
             if isinstance(filled, str) and filled.startswith("wait-cloudflare"):
                 form_filled_once = True
@@ -2821,7 +3705,6 @@ return 'filled-no-submit';
                 now = time.time()
                 if wait_cf_since is None:
                     wait_cf_since = now
-                # 卡住后自动二次复用 Turnstile 组件
                 if now - wait_cf_since >= 12 and now - last_cf_retry_at >= 8:
                     if log_callback:
                         log_callback("[*] Cloudflare 验证卡住，开始二次复用 Turnstile...")
@@ -2853,11 +3736,10 @@ return String(cfInput.value || '').trim().length;
 
             if filled in ("ready-to-submit", "filled-no-submit"):
                 form_filled_once = True
-            elif filled == "fill-failed" and log_callback:
-                log_callback("[Debug] 资料输入失败，重试中...")
+            elif filled == "not-ready":
                 sleep_with_cancel(0.5, cancel_callback)
                 continue
-            elif filled == "not-ready":
+            elif filled_s.startswith("fill-failed"):
                 sleep_with_cancel(0.5, cancel_callback)
                 continue
 
@@ -2955,6 +3837,7 @@ return String(cfInput.value || '').trim().length;
         sleep_with_cancel(0.5, cancel_callback)
 
     raise Exception("最终注册页资料填写失败")
+
 
 
 def wait_for_sso_cookie(timeout=120, log_callback=None, cancel_callback=None):
@@ -3105,7 +3988,7 @@ class GrokRegisterGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Grok 注册机")
-        self.root.geometry("1120x900")
+        self.root.geometry("1280x960")
         self.root.minsize(960, 700)
         self.is_running = False
         self.batch_count = 0
@@ -3135,17 +4018,19 @@ class GrokRegisterGUI:
             borderwidth=1,
         )
         config_frame.grid(row=0, column=0, sticky=tk.EW, pady=(0, 8))
-        config_frame.grid_columnconfigure(1, weight=1, minsize=260)
-        config_frame.grid_columnconfigure(3, weight=1, minsize=260)
+        config_frame.grid_columnconfigure(1, weight=1, minsize=220)
+        config_frame.grid_columnconfigure(3, weight=1, minsize=220)
 
         def add_label(row, column, text):
-            tk_label(config_frame, text=text, bg=UI_PANEL_BG).grid(
+            widget = tk_label(config_frame, text=text, bg=UI_PANEL_BG)
+            widget.grid(
                 row=row,
                 column=column,
                 sticky=tk.W,
                 padx=(0, 6),
                 pady=3,
             )
+            return widget
 
         def add_field(widget, row, column, columnspan=1, sticky=tk.EW):
             widget.grid(
@@ -3159,7 +4044,12 @@ class GrokRegisterGUI:
 
         add_label(0, 0, "邮箱服务商:")
         self.email_provider_var = tk.StringVar(value=config.get("email_provider", "duckmail"))
-        self.email_provider_combo = tk_option_menu(config_frame, self.email_provider_var, ["duckmail", "yyds", "cloudflare"], width=12)
+        self.email_provider_combo = tk_option_menu(
+            config_frame,
+            self.email_provider_var,
+            ["duckmail", "yyds", "cloudflare", "freemail", "icloud_hme"],
+            width=12,
+        )
         add_field(self.email_provider_combo, 0, 1, sticky=tk.W)
 
         add_label(0, 2, "注册数量:")
@@ -3180,39 +4070,57 @@ class GrokRegisterGUI:
         )
         add_field(self.count_spinbox, 0, 3, sticky=tk.W)
 
-        add_label(1, 0, "注册选项:")
+        add_label(1, 0, "并发线程:")
+        self.concurrent_var = tk.StringVar(value=str(config.get("concurrent_count", 1)))
+        concurrent_row = tk.Frame(config_frame, bg=UI_PANEL_BG)
+        self.concurrent_spinbox = tk.Spinbox(
+            concurrent_row,
+            from_=1,
+            to=16,
+            width=8,
+            textvariable=self.concurrent_var,
+            bg=UI_ENTRY_BG,
+            fg=UI_FG,
+            insertbackground=UI_FG,
+            buttonbackground=UI_BUTTON_BG,
+            disabledbackground="#2f2f2f",
+            disabledforeground=UI_MUTED_FG,
+            relief=tk.SOLID,
+        )
+        self.concurrent_spinbox.pack(side=tk.LEFT)
         self.nsfw_var = tk.BooleanVar(value=config.get("enable_nsfw", True))
-        self.nsfw_check = tk_checkbutton(config_frame, text="注册后开启 NSFW", variable=self.nsfw_var)
-        add_field(self.nsfw_check, 1, 1, sticky=tk.W)
+        self.nsfw_check = tk_checkbutton(concurrent_row, text="注册后开启 NSFW", variable=self.nsfw_var)
+        self.nsfw_check.pack(side=tk.LEFT, padx=(12, 0))
+        add_field(concurrent_row, 1, 1, sticky=tk.W)
 
         add_label(1, 2, "代理（可选）:")
         self.proxy_var = tk.StringVar(value=config.get("proxy", ""))
-        self.proxy_entry = tk_entry(config_frame, textvariable=self.proxy_var, width=34)
+        self.proxy_entry = tk_entry(config_frame, textvariable=self.proxy_var, width=26)
         add_field(self.proxy_entry, 1, 3)
 
-        add_label(2, 0, "DuckMail API Key:")
+        self.duckmail_api_key_label = add_label(2, 0, "DuckMail API Key:")
         self.api_key_var = tk.StringVar(value=config.get("duckmail_api_key", ""))
-        self.api_key_entry = tk_entry(config_frame, textvariable=self.api_key_var, width=34)
+        self.api_key_entry = tk_entry(config_frame, textvariable=self.api_key_var, width=26)
         add_field(self.api_key_entry, 2, 1)
 
-        add_label(2, 2, "Cloudflare 鉴权模式:")
+        self.cloudflare_auth_mode_label = add_label(2, 2, "Cloudflare 鉴权模式:")
         self.cloudflare_auth_mode_var = tk.StringVar(value=config.get("cloudflare_auth_mode", "none"))
         self.cloudflare_auth_mode_combo = tk_option_menu(
             config_frame, self.cloudflare_auth_mode_var, ["query-key", "bearer", "x-api-key", "x-admin-auth", "none"], width=12
         )
         add_field(self.cloudflare_auth_mode_combo, 2, 3, sticky=tk.W)
 
-        add_label(3, 0, "Cloudflare API Base:")
+        self.cloudflare_api_base_label = add_label(3, 0, "Cloudflare API Base:")
         self.cloudflare_api_base_var = tk.StringVar(value=config.get("cloudflare_api_base", ""))
-        self.cloudflare_api_base_entry = tk_entry(config_frame, textvariable=self.cloudflare_api_base_var, width=72)
+        self.cloudflare_api_base_entry = tk_entry(config_frame, textvariable=self.cloudflare_api_base_var, width=60)
         add_field(self.cloudflare_api_base_entry, 3, 1, columnspan=3)
 
-        add_label(4, 0, "Cloudflare API Key:")
+        self.cloudflare_api_key_label = add_label(4, 0, "Cloudflare API Key:")
         self.cloudflare_api_key_var = tk.StringVar(value=config.get("cloudflare_api_key", ""))
-        self.cloudflare_api_key_entry = tk_entry(config_frame, textvariable=self.cloudflare_api_key_var, width=34)
+        self.cloudflare_api_key_entry = tk_entry(config_frame, textvariable=self.cloudflare_api_key_var, width=26)
         add_field(self.cloudflare_api_key_entry, 4, 1)
 
-        add_label(4, 2, "CF 路径:")
+        self.cloudflare_paths_label = add_label(4, 2, "CF 路径:")
         self.cloudflare_paths_var = tk.StringVar(
             value=",".join(
                 [
@@ -3223,40 +4131,104 @@ class GrokRegisterGUI:
                 ]
             )
         )
-        self.cloudflare_paths_entry = tk_entry(config_frame, textvariable=self.cloudflare_paths_var, width=34)
+        self.cloudflare_paths_entry = tk_entry(config_frame, textvariable=self.cloudflare_paths_var, width=26)
         add_field(self.cloudflare_paths_entry, 4, 3)
 
-        add_label(5, 0, "grok2api 本地入池:")
+        self.freemail_api_base_label = add_label(5, 0, "Freemail API Base:")
+        self.freemail_api_base_var = tk.StringVar(value=config.get("freemail_api_base", ""))
+        self.freemail_api_base_entry = tk_entry(config_frame, textvariable=self.freemail_api_base_var, width=60)
+        add_field(self.freemail_api_base_entry, 5, 1, columnspan=3)
+
+        self.freemail_jwt_token_label = add_label(6, 0, "Freemail JWT Token:")
+        self.freemail_jwt_token_var = tk.StringVar(value=config.get("freemail_jwt_token", ""))
+        self.freemail_jwt_token_entry = tk_entry(config_frame, textvariable=self.freemail_jwt_token_var, width=26)
+        add_field(self.freemail_jwt_token_entry, 6, 1)
+
+        self.freemail_domain_label = add_label(6, 2, "Freemail 域名(逗号多域):")
+        self.freemail_domain_var = tk.StringVar(value=config.get("freemail_domain", ""))
+        self.freemail_domain_entry = tk_entry(config_frame, textvariable=self.freemail_domain_var, width=26)
+        add_field(self.freemail_domain_entry, 6, 3)
+
+        self.icloud_hme_api_base_label = add_label(5, 0, "HME API Base:")
+        self.icloud_hme_api_base_var = tk.StringVar(value=config.get("icloud_hme_api_base", ""))
+        self.icloud_hme_api_base_entry = tk_entry(
+            config_frame, textvariable=self.icloud_hme_api_base_var, width=60
+        )
+        add_field(self.icloud_hme_api_base_entry, 5, 1, columnspan=3)
+
+        self.icloud_hme_account_id_label = add_label(6, 0, "HME Account ID:")
+        self.icloud_hme_account_id_var = tk.StringVar(value=config.get("icloud_hme_account_id", ""))
+        self.icloud_hme_account_id_entry = tk_entry(
+            config_frame, textvariable=self.icloud_hme_account_id_var, width=26
+        )
+        add_field(self.icloud_hme_account_id_entry, 6, 1)
+
+        self.icloud_hme_label_label = add_label(6, 2, "HME 标签:")
+        self.icloud_hme_label_var = tk.StringVar(value=config.get("icloud_hme_label", "Grok auto-register"))
+        self.icloud_hme_label_entry = tk_entry(
+            config_frame, textvariable=self.icloud_hme_label_var, width=26
+        )
+        add_field(self.icloud_hme_label_entry, 6, 3)
+
+        add_label(7, 0, "grok2api 本地入池:")
         self.grok2api_local_auto_var = tk.BooleanVar(value=bool(config.get("grok2api_auto_add_local", True)))
         self.grok2api_local_auto_check = tk_checkbutton(config_frame, variable=self.grok2api_local_auto_var)
-        add_field(self.grok2api_local_auto_check, 5, 1, sticky=tk.W)
+        add_field(self.grok2api_local_auto_check, 7, 1, sticky=tk.W)
 
-        add_label(5, 2, "grok2api 池名:")
+        add_label(7, 2, "grok2api 池名:")
         self.grok2api_pool_name_var = tk.StringVar(value=str(config.get("grok2api_pool_name", "ssoBasic")))
         self.grok2api_pool_name_combo = tk_option_menu(
             config_frame, self.grok2api_pool_name_var, ["ssoBasic", "ssoSuper"], width=12
         )
-        add_field(self.grok2api_pool_name_combo, 5, 3, sticky=tk.W)
+        add_field(self.grok2api_pool_name_combo, 7, 3, sticky=tk.W)
 
-        add_label(6, 0, "本地 token.json:")
+        add_label(8, 0, "本地 token.json:")
         self.grok2api_local_file_var = tk.StringVar(value=str(config.get("grok2api_local_token_file", "")))
-        self.grok2api_local_file_entry = tk_entry(config_frame, textvariable=self.grok2api_local_file_var, width=72)
-        add_field(self.grok2api_local_file_entry, 6, 1, columnspan=3)
+        self.grok2api_local_file_entry = tk_entry(config_frame, textvariable=self.grok2api_local_file_var, width=60)
+        add_field(self.grok2api_local_file_entry, 8, 1, columnspan=3)
 
-        add_label(7, 0, "grok2api 远端入池:")
+        add_label(9, 0, "grok2api 远端入池:")
         self.grok2api_remote_auto_var = tk.BooleanVar(value=bool(config.get("grok2api_auto_add_remote", False)))
         self.grok2api_remote_auto_check = tk_checkbutton(config_frame, variable=self.grok2api_remote_auto_var)
-        add_field(self.grok2api_remote_auto_check, 7, 1, sticky=tk.W)
+        add_field(self.grok2api_remote_auto_check, 9, 1, sticky=tk.W)
 
-        add_label(8, 0, "grok2api 远端 Base:")
+        add_label(10, 0, "grok2api 远端 Base:")
         self.grok2api_remote_base_var = tk.StringVar(value=str(config.get("grok2api_remote_base", "")))
-        self.grok2api_remote_base_entry = tk_entry(config_frame, textvariable=self.grok2api_remote_base_var, width=72)
-        add_field(self.grok2api_remote_base_entry, 8, 1, columnspan=3)
+        self.grok2api_remote_base_entry = tk_entry(config_frame, textvariable=self.grok2api_remote_base_var, width=60)
+        add_field(self.grok2api_remote_base_entry, 10, 1, columnspan=3)
 
-        add_label(9, 0, "grok2api 远端 app_key:")
+        add_label(11, 0, "grok2api 远端 app_key:")
         self.grok2api_remote_key_var = tk.StringVar(value=str(config.get("grok2api_remote_app_key", "")))
-        self.grok2api_remote_key_entry = tk_entry(config_frame, textvariable=self.grok2api_remote_key_var, width=72)
-        add_field(self.grok2api_remote_key_entry, 9, 1, columnspan=3)
+        self.grok2api_remote_key_entry = tk_entry(config_frame, textvariable=self.grok2api_remote_key_var, width=60)
+        add_field(self.grok2api_remote_key_entry, 11, 1, columnspan=3)
+
+        add_label(12, 0, "CPA 远端上传:")
+        self.cpa_remote_enabled_var = tk.BooleanVar(value=bool(config.get("cpa_remote_enabled", False)))
+        self.cpa_remote_enabled_check = tk_checkbutton(
+            config_frame, text="生成后自动上传并确认", variable=self.cpa_remote_enabled_var
+        )
+        add_field(self.cpa_remote_enabled_check, 12, 1, sticky=tk.W)
+
+        add_label(12, 2, "CPA 补传操作:")
+        self.cpa_remote_retry_btn = tk_button(
+            config_frame, text="测试并补传", command=self.retry_cpa_remote_uploads
+        )
+        add_field(self.cpa_remote_retry_btn, 12, 3, sticky=tk.W)
+
+        add_label(13, 0, "CPA 远端 Base:")
+        self.cpa_remote_base_var = tk.StringVar(value=str(config.get("cpa_remote_base", "")))
+        self.cpa_remote_base_entry = tk_entry(config_frame, textvariable=self.cpa_remote_base_var, width=60)
+        add_field(self.cpa_remote_base_entry, 13, 1, columnspan=3)
+
+        add_label(14, 0, "CPA 管理密钥:")
+        self.cpa_remote_key_var = tk.StringVar(value=str(config.get("cpa_remote_management_key", "")))
+        self.cpa_remote_key_entry = tk_entry(
+            config_frame, textvariable=self.cpa_remote_key_var, width=60, show="*"
+        )
+        add_field(self.cpa_remote_key_entry, 14, 1, columnspan=3)
+
+        self.email_provider_var.trace_add("write", self._update_email_provider_fields)
+        self._update_email_provider_fields()
 
         btn_frame = tk.Frame(main_frame, bg=UI_BG)
         btn_frame.grid(row=1, column=0, sticky=tk.EW, pady=(0, 6))
@@ -3304,7 +4276,7 @@ class GrokRegisterGUI:
         )
         self.log_text.grid(row=0, column=0, sticky=tk.NSEW)
         self.log("[*] GUI 已就绪，配置已加载")
-        self.log(f"[*] 当前邮箱服务商: {self.email_provider_var.get()} | 注册数量: {self.count_var.get()}")
+        self.log(f"[*] 当前邮箱服务商: {self.email_provider_var.get()} | 注册数量: {self.count_var.get()} | 并发: {self.concurrent_var.get()}")
 
     def log(self, message):
         if not should_emit_log(message):
@@ -3325,11 +4297,109 @@ class GrokRegisterGUI:
         except Exception:
             pass
 
+    def _update_email_provider_fields(self, *_args):
+        provider = self.email_provider_var.get().strip().lower()
+        duckmail_widgets = (
+            self.duckmail_api_key_label,
+            self.api_key_entry,
+        )
+        cloudflare_widgets = (
+            self.cloudflare_auth_mode_label,
+            self.cloudflare_auth_mode_combo,
+            self.cloudflare_api_base_label,
+            self.cloudflare_api_base_entry,
+            self.cloudflare_api_key_label,
+            self.cloudflare_api_key_entry,
+            self.cloudflare_paths_label,
+            self.cloudflare_paths_entry,
+        )
+        freemail_widgets = (
+            self.freemail_api_base_label,
+            self.freemail_api_base_entry,
+            self.freemail_jwt_token_label,
+            self.freemail_jwt_token_entry,
+            self.freemail_domain_label,
+            self.freemail_domain_entry,
+        )
+        icloud_widgets = (
+            self.icloud_hme_api_base_label,
+            self.icloud_hme_api_base_entry,
+            self.icloud_hme_account_id_label,
+            self.icloud_hme_account_id_entry,
+            self.icloud_hme_label_label,
+            self.icloud_hme_label_entry,
+        )
+        for widget in duckmail_widgets:
+            (widget.grid if provider == "duckmail" else widget.grid_remove)()
+        for widget in cloudflare_widgets:
+            (widget.grid if provider == "cloudflare" else widget.grid_remove)()
+        for widget in freemail_widgets:
+            (widget.grid if provider == "freemail" else widget.grid_remove)()
+        for widget in icloud_widgets:
+            (widget.grid if provider in ("icloud_hme", "icloud-hme") else widget.grid_remove)()
+
     def clear_log(self):
         self.log_text.delete(1.0, tk.END)
 
     def update_stats(self):
         self.stats_var.set(f"成功: {self.success_count} | 失败: {self.fail_count}")
+
+    def _save_cpa_remote_config_from_ui(self):
+        config["cpa_remote_enabled"] = bool(self.cpa_remote_enabled_var.get())
+        config["cpa_remote_base"] = self.cpa_remote_base_var.get().strip().rstrip("/")
+        config["cpa_remote_management_key"] = self.cpa_remote_key_var.get().strip()
+        save_config()
+
+    def retry_cpa_remote_uploads(self):
+        self._save_cpa_remote_config_from_ui()
+        if not config.get("cpa_remote_enabled"):
+            self.log("[!] 请先勾选 CPA 远端上传")
+            return
+        if not config.get("cpa_remote_base") or not config.get("cpa_remote_management_key"):
+            self.log("[!] 请先填写 CPA 远端 Base 和管理密钥")
+            return
+
+        self.cpa_remote_retry_btn.config(state=tk.DISABLED)
+        self.log("[*] 正在测试 CPA 管理接口并补传本地 pending 文件...")
+
+        def thread_log(message):
+            try:
+                self.root.after(0, self.log, message)
+            except Exception:
+                pass
+
+        def worker():
+            try:
+                from cpa_remote import retry_pending_auth_files
+
+                auth_dir = str(config.get("cpa_auth_dir", "cpa_auths") or "cpa_auths")
+                if not os.path.isabs(auth_dir):
+                    auth_dir = os.path.join(os.path.dirname(__file__), auth_dir)
+                result = retry_pending_auth_files(auth_dir, config, log_callback=thread_log)
+            except Exception as exc:
+                result = {"ok": False, "error": str(exc), "pending": [], "uploaded": []}
+
+            def finish():
+                try:
+                    self.cpa_remote_retry_btn.config(state=tk.NORMAL)
+                    uploaded = result.get("uploaded") or []
+                    pending = result.get("pending") or []
+                    if result.get("ok"):
+                        remote_count = result.get("remote_count")
+                        suffix = f"，远端共 {remote_count} 个认证文件" if remote_count is not None else ""
+                        self.log(f"[+] CPA 远端验证成功；本次确认 {len(uploaded)} 个，待重试 0 个{suffix}")
+                    else:
+                        error = result.get("error") or result.get("list_error") or "未知错误"
+                        self.log(f"[!] CPA 远端验证/补传失败；待重试 {len(pending)} 个: {error}")
+                except Exception:
+                    pass
+
+            try:
+                self.root.after(0, finish)
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, name="cpa-remote-retry", daemon=True).start()
 
     def _set_running_ui(self, running):
         self.is_running = running
@@ -3350,6 +4420,12 @@ class GrokRegisterGUI:
         config["enable_nsfw"] = bool(self.nsfw_var.get())
         config["proxy"] = self.proxy_var.get().strip()
         config["duckmail_api_key"] = self.api_key_var.get().strip()
+        config["freemail_api_base"] = self.freemail_api_base_var.get().strip()
+        config["freemail_jwt_token"] = self.freemail_jwt_token_var.get().strip()
+        config["freemail_domain"] = ",".join(parse_freemail_domains(self.freemail_domain_var.get()))
+        config["icloud_hme_api_base"] = self.icloud_hme_api_base_var.get().strip().rstrip("/")
+        config["icloud_hme_account_id"] = self.icloud_hme_account_id_var.get().strip()
+        config["icloud_hme_label"] = self.icloud_hme_label_var.get().strip()
         config["cloudflare_api_base"] = self.cloudflare_api_base_var.get().strip()
         config["cloudflare_api_key"] = self.cloudflare_api_key_var.get().strip()
         config["cloudflare_auth_mode"] = self.cloudflare_auth_mode_var.get().strip() or "none"
@@ -3359,6 +4435,9 @@ class GrokRegisterGUI:
         config["grok2api_auto_add_remote"] = bool(self.grok2api_remote_auto_var.get())
         config["grok2api_remote_base"] = self.grok2api_remote_base_var.get().strip()
         config["grok2api_remote_app_key"] = self.grok2api_remote_key_var.get().strip()
+        config["cpa_remote_enabled"] = bool(self.cpa_remote_enabled_var.get())
+        config["cpa_remote_base"] = self.cpa_remote_base_var.get().strip().rstrip("/")
+        config["cpa_remote_management_key"] = self.cpa_remote_key_var.get().strip()
         raw_paths = [x.strip() for x in self.cloudflare_paths_var.get().split(",") if x.strip()]
         if len(raw_paths) >= 4:
             config["cloudflare_path_domains"] = raw_paths[0] if raw_paths[0].startswith("/") else ("/" + raw_paths[0])
@@ -3369,12 +4448,43 @@ class GrokRegisterGUI:
         if config["email_provider"] == "cloudflare" and not config["cloudflare_api_base"]:
             self.log("[!] Cloudflare 模式需要先填写 Cloudflare API Base")
             return
+        if config["email_provider"] == "freemail":
+            missing = []
+            if not config["freemail_api_base"]:
+                missing.append("API Base")
+            if not config["freemail_jwt_token"]:
+                missing.append("JWT Token")
+            # freemail_domain 可留空：留空时轮换 Freemail /api/domains 全部域名
+            if missing:
+                self.log(f"[!] Freemail 模式需要先填写: {', '.join(missing)}")
+                return
+        if config["email_provider"] in ("icloud_hme", "icloud-hme"):
+            missing = []
+            if not config["icloud_hme_api_base"]:
+                missing.append("API Base")
+            if not config["icloud_hme_account_id"]:
+                missing.append("Account ID")
+            if missing:
+                self.log(f"[!] iCloud HME 模式需要先填写: {', '.join(missing)}")
+                return
+        if config.get("cpa_remote_enabled") and (
+            not config.get("cpa_remote_base") or not config.get("cpa_remote_management_key")
+        ):
+            self.log("[!] CPA 远端上传已开启，请填写 CPA 远端 Base 和管理密钥")
+            return
         try:
             count = int(self.count_var.get())
         except Exception:
             self.log("[!] 注册数量无效")
             return
+        try:
+            concurrent = max(1, min(16, int(self.concurrent_var.get())))
+        except Exception:
+            self.log("[!] 并发线程数无效（请填 1-16）")
+            return
+        self.concurrent_var.set(str(concurrent))
         config["register_count"] = count
+        config["concurrent_count"] = concurrent
         save_config()
         self.stop_requested = False
         self.success_count = 0
@@ -3386,7 +4496,7 @@ class GrokRegisterGUI:
         )
         self.update_stats()
         self._set_running_ui(True)
-        self.log(f"[*] 配置已保存，开始执行。目标数量: {count}")
+        self.log(f"[*] 配置已保存，开始执行。目标数量: {count} | 并发线程: {concurrent}")
         self.log(f"[*] 成功账号将实时保存到: {self.accounts_output_file}")
         threading.Thread(
             target=self.run_registration,
@@ -3413,7 +4523,7 @@ class GrokRegisterGUI:
         )
         try:
             concurrent = max(1, int(config.get("concurrent_count", 1) or 1))
-            self.log(f"[*] 日志级别: {get_log_level()} | 速度统计间隔: {int(interval)}s")
+            self.log(f"[*] 日志级别: {get_log_level()} | 速度统计间隔: {int(interval)}s | 并发: {concurrent}")
             if concurrent <= 1:
                 self._run_single_worker(count, worker_id=0)
             else:
@@ -3497,7 +4607,6 @@ class GrokRegisterGUI:
                             log_fn(
                                 f"[!] 账号流程卡住，重试第 {retry_count_for_slot}/{max_slot_retry} 次: {exc}"
                             )
-                            restart_browser(log_callback=log_fn)
                             continue
                         with _stats_lock:
                             self.fail_count += 1
@@ -3514,14 +4623,12 @@ class GrokRegisterGUI:
                         if self.should_stop():
                             break
                         # 与稳定版/单 worker 一致：每账号完整重启，避免 SSO/TOS 会话残留落到 tos-gate
-                        if _get_browser() is None:
-                            start_browser(log_callback=log_fn)
-                        else:
-                            if restart_every > 0 and local_attempts % restart_every == 0:
-                                log_fn(
-                                    f"[*] Worker-{worker_id} 已处理 {local_attempts} 个账号，周期重启浏览器"
-                                )
-                            restart_browser(log_callback=log_fn)
+                        _close_browser_after_attempt(
+                            log_callback=log_fn,
+                            attempts=local_attempts,
+                            restart_every=restart_every,
+                            label=f"Worker-{worker_id}",
+                        )
                         sleep_with_cancel(1, self.should_stop)
         finally:
             stop_browser()
@@ -3647,9 +4754,6 @@ class GrokRegisterGUI:
                 self._register_one_account(self.log, worker_id, i)
                 retry_count_for_slot = 0
                 i += 1
-                if restart_every > 0 and i > 0 and i % restart_every == 0:
-                    self.log(f"[*] 已注册 {i} 个账号，重启浏览器")
-                    restart_browser(log_callback=self.log)
                 if (
                     self.success_count > 0
                     and self.success_count % MEMORY_CLEANUP_INTERVAL == 0
@@ -3682,10 +4786,11 @@ class GrokRegisterGUI:
                 self.update_stats()
                 if self.should_stop():
                     break
-                if _get_browser() is None:
-                    start_browser(log_callback=self.log)
-                else:
-                    restart_browser(log_callback=self.log)
+                _close_browser_after_attempt(
+                    log_callback=self.log,
+                    attempts=i,
+                    restart_every=restart_every,
+                )
                 sleep_with_cancel(1, self.should_stop)
         stop_browser()
 
@@ -3892,7 +4997,6 @@ def _cli_worker_loop(worker_id, task_queue, total_count, controller, accounts_ou
                         log_fn(
                             f"[!] 账号流程卡住，重试第 {retry_count_for_slot}/{max_slot_retry} 次: {exc}"
                         )
-                        restart_browser(log_callback=log_fn)
                         continue
                     with stats["lock"]:
                         stats["fail"] += 1
@@ -3908,14 +5012,12 @@ def _cli_worker_loop(worker_id, task_queue, total_count, controller, accounts_ou
                     if controller.should_stop():
                         break
                     # 与稳定版/单 worker 一致：每账号完整重启，避免 SSO/TOS 会话残留落到 tos-gate
-                    if _get_browser() is None:
-                        start_browser(log_callback=log_fn)
-                    else:
-                        if restart_every > 0 and local_attempts % restart_every == 0:
-                            log_fn(
-                                f"[*] Worker-{worker_id} 已处理 {local_attempts} 个账号，周期重启浏览器"
-                            )
-                        restart_browser(log_callback=log_fn)
+                    _close_browser_after_attempt(
+                        log_callback=log_fn,
+                        attempts=local_attempts,
+                        restart_every=restart_every,
+                        label=f"Worker-{worker_id}",
+                    )
                     sleep_with_cancel(1, controller.should_stop)
     finally:
         stop_browser()
@@ -3998,9 +5100,6 @@ def run_registration_cli(count):
                     retry_count_for_slot = 0
                     i += 1
                     cli_log(f"[*] 当前统计: 成功 {stats['success']} | 失败 {stats['fail']}")
-                    if restart_every > 0 and i > 0 and i % restart_every == 0:
-                        cli_log(f"[*] 已注册 {i} 个账号，重启浏览器")
-                        restart_browser(log_callback=cli_log)
                     if (
                         stats["success"] > 0
                         and stats["success"] % MEMORY_CLEANUP_INTERVAL == 0
@@ -4034,10 +5133,11 @@ def run_registration_cli(count):
                 finally:
                     if controller.should_stop():
                         break
-                    if _get_browser() is None:
-                        start_browser(log_callback=cli_log)
-                    else:
-                        restart_browser(log_callback=cli_log)
+                    _close_browser_after_attempt(
+                        log_callback=cli_log,
+                        attempts=i,
+                        restart_every=restart_every,
+                    )
                     sleep_with_cancel(1, controller.should_stop)
     except KeyboardInterrupt:
         controller.stop()
