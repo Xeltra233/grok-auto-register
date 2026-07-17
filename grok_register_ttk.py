@@ -1226,9 +1226,9 @@ def run_success_live_gate(email, password, sso, log_callback=None, page=None):
         except Exception as exc:
             if log_callback:
                 if require_live:
-                log_callback(f"[!] CPA 导出异常: {exc}")
-            else:
-                log_callback(f"[!] CPA 导出异常，账号结果仍将保留: {exc}")
+                    log_callback(f"[!] CPA 导出异常: {exc}")
+                else:
+                    log_callback(f"[!] CPA 导出异常，账号结果仍将保留: {exc}")
             if require_live:
                 return {"ok": False, "cpa_result": None, "live": None, "error": str(exc)}
             return {"ok": True, "warning": True, "cpa_result": None, "live": None, "error": str(exc)}
