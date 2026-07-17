@@ -1002,6 +1002,91 @@ def upload_to_cpa_server(local_path, log_callback=None):
         return False
 
 
+
+def persist_successful_account(email, password, sso, accounts_output_file, log_callback=None, profile=None):
+    """Write local account artifacts only after live-inspect success gate."""
+    line = f"{email}----{password or ''}----{sso}\n"
+    try:
+        with _io_lock:
+            with open(accounts_output_file, "a", encoding="utf-8") as f:
+                f.write(line)
+    except Exception as file_exc:
+        if log_callback:
+            log_callback(f"[Debug] ????????: {file_exc}")
+    add_token_to_grok2api_pools(sso, email=email, log_callback=log_callback)
+    add_token_to_token_only_file(sso, log_callback=log_callback)
+    return {"email": email, "sso": sso, "profile": profile or {}}
+
+
+def run_success_live_gate(email, password, sso, log_callback=None, page=None):
+    """Require grok-inspection style live pass before local save / push."""
+    require_live = bool(config.get("success_require_live", True))
+    live_enabled = bool(config.get("live_inspect_enabled", True))
+    cpa_enabled = bool(config.get("cpa_export_enabled", True))
+
+    if not require_live and not live_enabled:
+        if cpa_enabled:
+            try:
+                r = export_cpa_xai_for_account(
+                    email, password or "", sso=sso, log_callback=log_callback, page=page
+                )
+                return {"ok": True, "skipped": True, "cpa_result": r, "live": (r or {}).get("live_inspect")}
+            except Exception as exc:
+                if log_callback:
+                    log_callback(f"[!] CPA ?????????????: {exc}")
+                return {"ok": True, "skipped": True, "cpa_result": None, "live": None, "error": str(exc)}
+        return {"ok": True, "skipped": True, "cpa_result": None, "live": None}
+
+    if cpa_enabled:
+        if log_callback:
+            log_callback("[*] ????: CPA mint + ???????????/???")
+        result = export_cpa_xai_for_account(
+            email,
+            password or "",
+            sso=sso,
+            log_callback=log_callback,
+            page=page,
+        )
+        if result.get("ok"):
+            if log_callback:
+                log_callback(f"[+] ?????????/??: {result.get('path', '')}")
+            return {"ok": True, "cpa_result": result, "live": result.get("live_inspect")}
+        err = result.get("error") or "live/CPA gate failed"
+        if log_callback:
+            log_callback(f"[!] ??/CPA ???????????????: {err}")
+        return {"ok": False, "cpa_result": result, "live": result.get("live_inspect"), "error": err}
+
+    if log_callback:
+        log_callback("[*] ????: SSO->access_token ?????? CPA ???")
+    try:
+        from cpa_xai.auth_code import mint_tokens_from_sso
+        from cpa_xai.inspect import inspect_access_token, is_live_pass
+
+        def _live_log(msg):
+            if log_callback:
+                log_callback(f"[live] {msg}")
+
+        tokens = mint_tokens_from_sso(sso, log=_live_log)
+        access = str((tokens or {}).get("access_token") or "").strip()
+        live = inspect_access_token(access)
+        if log_callback:
+            log_callback(
+                f"[*] live inspect: healthy={live.get('healthy')} class={live.get('classification')} reason={live.get('reason')}"
+            )
+        if is_live_pass(live):
+            return {"ok": True, "cpa_result": None, "live": live}
+        return {
+            "ok": False,
+            "cpa_result": None,
+            "live": live,
+            "error": f"live inspect failed: {live.get('classification')}: {live.get('reason')}",
+        }
+    except Exception as exc:
+        if log_callback:
+            log_callback(f"[!] ???????????: {exc}")
+        return {"ok": False, "cpa_result": None, "live": None, "error": str(exc)}
+
+
 def export_cpa_xai_for_account(email, password, sso=None, log_callback=None, page=None):
     if not config.get("cpa_export_enabled", True):
         if log_callback:
@@ -4717,58 +4802,34 @@ class GrokRegisterGUI:
             log_callback=log_fn, cancel_callback=self.should_stop
         )
         _cpa_page = _get_page()
-        if config.get("cpa_export_enabled", True):
-            cpa_async = bool(config.get("cpa_mint_async", True))
-            if cpa_async:
-                log_fn("[*] 6. CPA xAI 导出 (异步)")
-                _cpa_bg_page = None
-                def _cpa_mint_bg():
-                    time.sleep(5)
-                    try:
-                        r = export_cpa_xai_for_account(
-                            email, profile.get("password", ""), sso=sso,
-                            log_callback=log_fn, page=_cpa_bg_page,
-                        )
-                        if r.get("ok"):
-                            log_fn(f"[+] CPA xAI 导出成功: {r.get('path', '')}")
-                        elif not r.get("skipped"):
-                            log_fn(f"[!] CPA xAI 导出失败: {r.get('error', '未知错误')}")
-                    except Exception as e:
-                        log_fn(f"[!] CPA xAI 导出异常: {e}")
-                _t = threading.Thread(target=_cpa_mint_bg, daemon=True)
-                _t.start()
-                _track_cpa_async_thread(_t)
-            else:
-                log_fn("[*] 6. CPA xAI 导出 (同步)")
-                cpa_result = export_cpa_xai_for_account(
-                    email, profile.get("password", ""), sso=sso,
-                    log_callback=log_fn, page=_cpa_page,
-                )
-                if cpa_result.get("ok"):
-                    log_fn(f"[+] CPA xAI 导出成功: {cpa_result.get('path', '')}")
-                elif not cpa_result.get("skipped"):
-                    log_fn(f"[!] CPA xAI 导出失败: {cpa_result.get('error', '未知错误')}")
         if config.get("enable_nsfw", True):
-            log_fn("[*] 6. 开启 NSFW")
+            log_fn("[*] 6. ?? NSFW")
             nsfw_ok, nsfw_msg = enable_nsfw_for_token(sso, log_callback=log_fn)
             if nsfw_ok:
-                log_fn(f"[+] NSFW 开启成功: {nsfw_msg}")
+                log_fn(f"[+] NSFW ????: {nsfw_msg}")
             else:
-                log_fn(f"[!] NSFW 未开启，继续保存账号: {nsfw_msg}")
+                log_fn(f"[!] NSFW ??????????: {nsfw_msg}")
+        gate = run_success_live_gate(
+            email,
+            profile.get("password", ""),
+            sso,
+            log_callback=log_fn,
+            page=None if bool(config.get("cpa_mint_async", True)) else _cpa_page,
+        )
+        if not gate.get("ok"):
+            raise Exception(gate.get("error") or "live inspect gate failed")
+        persist_successful_account(
+            email,
+            profile.get("password", ""),
+            sso,
+            self.accounts_output_file,
+            log_callback=log_fn,
+            profile=profile,
+        )
         with _stats_lock:
-            self.results.append({"email": email, "sso": sso, "profile": profile})
-        try:
-            line = f"{email}----{profile.get('password','')}----{sso}\n"
-            with _io_lock:
-                with open(self.accounts_output_file, "a", encoding="utf-8") as f:
-                    f.write(line)
-        except Exception as file_exc:
-            log_fn(f"[Debug] 保存账号文件失败: {file_exc}")
-        add_token_to_grok2api_pools(sso, email=email, log_callback=log_fn)
-        add_token_to_token_only_file(sso, log_callback=log_fn)
-        with _stats_lock:
+            self.results.append({"email": email, "sso": sso, "profile": profile, "live": gate.get("live")})
             self.success_count += 1
-        log_fn(f"[+] 注册成功: {email}")
+        log_fn(f"[+] ????: {email}")
 
     def _run_single_worker(self, count, worker_id=0):
         _set_worker_id(worker_id)
@@ -4942,54 +5003,31 @@ def _register_one_account_cli(log_fn, stop_fn, accounts_output_file):
         log_callback=log_fn, cancel_callback=stop_fn
     )
     _cpa_page = _get_page()
-    if config.get("cpa_export_enabled", True):
-        cpa_async = bool(config.get("cpa_mint_async", True))
-        if cpa_async:
-            log_fn("[*] 6. CPA xAI 导出 (异步)")
-            _cpa_bg_page = None
-            def _cpa_mint_bg():
-                time.sleep(5)
-                try:
-                    r = export_cpa_xai_for_account(
-                        email, profile.get("password", ""), sso=sso,
-                        log_callback=log_fn, page=_cpa_bg_page,
-                    )
-                    if r.get("ok"):
-                        log_fn(f"[+] CPA xAI 导出成功: {r.get('path', '')}")
-                    elif not r.get("skipped"):
-                        log_fn(f"[!] CPA xAI 导出失败: {r.get('error', '未知错误')}")
-                except Exception as e:
-                    log_fn(f"[!] CPA xAI 导出异常: {e}")
-            _t = threading.Thread(target=_cpa_mint_bg, daemon=True)
-            _t.start()
-            _track_cpa_async_thread(_t)
-        else:
-            log_fn("[*] 6. CPA xAI 导出 (同步)")
-            cpa_result = export_cpa_xai_for_account(
-                email, profile.get("password", ""), sso=sso,
-                log_callback=log_fn, page=_cpa_page,
-            )
-            if cpa_result.get("ok"):
-                log_fn(f"[+] CPA xAI 导出成功: {cpa_result.get('path', '')}")
-            elif not cpa_result.get("skipped"):
-                log_fn(f"[!] CPA xAI 导出失败: {cpa_result.get('error', '未知错误')}")
     if config.get("enable_nsfw", True):
-        log_fn("[*] 6. 开启 NSFW")
+        log_fn("[*] 6. ?? NSFW")
         nsfw_ok, nsfw_msg = enable_nsfw_for_token(sso, log_callback=log_fn)
         if nsfw_ok:
-            log_fn(f"[+] NSFW 开启成功: {nsfw_msg}")
+            log_fn(f"[+] NSFW ????: {nsfw_msg}")
         else:
-            log_fn(f"[!] NSFW 未开启，继续保存账号: {nsfw_msg}")
-    try:
-        line = f"{email}----{profile.get('password','')}----{sso}\n"
-        with _io_lock:
-            with open(accounts_output_file, "a", encoding="utf-8") as f:
-                f.write(line)
-    except Exception as file_exc:
-        log_fn(f"[Debug] 保存账号文件失败: {file_exc}")
-    add_token_to_grok2api_pools(sso, email=email, log_callback=log_fn)
-    add_token_to_token_only_file(sso, log_callback=log_fn)
-    log_fn(f"[+] 注册成功: {email}")
+            log_fn(f"[!] NSFW ??????????: {nsfw_msg}")
+    gate = run_success_live_gate(
+        email,
+        profile.get("password", ""),
+        sso,
+        log_callback=log_fn,
+        page=None if bool(config.get("cpa_mint_async", True)) else _cpa_page,
+    )
+    if not gate.get("ok"):
+        raise Exception(gate.get("error") or "live inspect gate failed")
+    persist_successful_account(
+        email,
+        profile.get("password", ""),
+        sso,
+        accounts_output_file,
+        log_callback=log_fn,
+        profile=profile,
+    )
+    log_fn(f"[+] ????: {email}")
 
 
 def _cli_worker_loop(worker_id, task_queue, total_count, controller, accounts_output_file, stats):

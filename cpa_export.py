@@ -111,8 +111,13 @@ def export_cpa_xai_for_account(
         ).strip()
     # Default headed: headless is frequently Cloudflare-blocked on accounts.x.ai
     headless = bool(cfg.get("cpa_headless", False))
-    probe = bool(cfg.get("cpa_probe_after_write", False))
+    probe = bool(cfg.get("cpa_probe_after_write", True))
     probe_chat = bool(cfg.get("cpa_probe_chat", False))
+    probe_strict = bool(cfg.get("cpa_probe_strict", False))
+    live_inspect = bool(cfg.get("live_inspect_enabled", cfg.get("cpa_live_inspect", True)))
+    # Success gate: live inspect pass is required before keep/push.
+    if bool(cfg.get("success_require_live", True)):
+        live_inspect = True
     timeout = float(cfg.get("cpa_mint_timeout_sec", 240))
     base_url = cfg.get("cpa_base_url") or "https://cli-chat-proxy.grok.com/v1"
     cpa_headers = cfg.get("cpa_headers") or None
@@ -120,11 +125,31 @@ def export_cpa_xai_for_account(
     cookie_inject = bool(cfg.get("cpa_mint_cookie_inject", True))
     reuse_browser = bool(cfg.get("cpa_mint_browser_reuse", True))
     recycle_every = int(cfg.get("cpa_mint_browser_recycle_every", 15) or 0)
+    prefer_auth_code = bool(cfg.get("cpa_prefer_auth_code", True))
+    require_cli_referrer = bool(cfg.get("cpa_require_cli_referrer", True))
+    allow_device_fallback = bool(cfg.get("cpa_allow_device_fallback", True))
 
     reuse_page = None if force_standalone else page
 
+    # Resolve SSO early: pure HTTP auth-code mint does not need a browser.
+    sso_val = (sso or "").strip()
+    if not sso_val and isinstance(cookies, list):
+        for c in cookies:
+            if isinstance(c, dict) and c.get("name") in ("sso", "sso-rw") and c.get("value"):
+                sso_val = str(c.get("value") or "").strip()
+                break
+    if not sso_val and page is not None:
+        try:
+            for c in export_cookies_from_page(page):
+                if isinstance(c, dict) and c.get("name") in ("sso", "sso-rw") and c.get("value"):
+                    sso_val = str(c.get("value") or "").strip()
+                    break
+        except Exception:
+            pass
+
     # cookies: explicit arg > page export > none
     # When reusing registration browser, skip cookie injection (already logged in)
+    # Device-code fallback still benefits from cookie inject when no auth-code SSO path.
     use_cookies = None
     if reuse_page is None:
         use_cookies = cookies
@@ -132,30 +157,35 @@ def export_cpa_xai_for_account(
             use_cookies = export_cookies_from_page(page)
         if not cookie_inject:
             use_cookies = None
-        else:
-            sso_val = (sso or "").strip()
-            if not sso_val and isinstance(use_cookies, list):
-                for c in use_cookies:
-                    if isinstance(c, dict) and c.get("name") in ("sso", "sso-rw") and c.get("value"):
-                        sso_val = str(c.get("value"))
-                        break
-            if sso_val:
-                base = list(use_cookies) if isinstance(use_cookies, list) else []
-                for name in ("sso", "sso-rw"):
-                    for dom in (".x.ai", "accounts.x.ai", ".accounts.x.ai", "grok.com", ".grok.com"):
-                        base.append({
-                            "name": name,
-                            "value": sso_val,
-                            "domain": dom,
-                            "path": "/",
-                            "secure": True,
-                            "httpOnly": True,
-                        })
-                use_cookies = base
+        elif sso_val:
+            base = list(use_cookies) if isinstance(use_cookies, list) else []
+            for name in ("sso", "sso-rw"):
+                for dom in (".x.ai", "accounts.x.ai", ".accounts.x.ai", "grok.com", ".grok.com"):
+                    base.append({
+                        "name": name,
+                        "value": sso_val,
+                        "domain": dom,
+                        "path": "/",
+                        "secure": True,
+                        "httpOnly": True,
+                    })
+            use_cookies = base
 
     out_dir.mkdir(parents=True, exist_ok=True)
+    pending_name = str(cfg.get("cpa_remote_pending_dir", "pending") or "pending").strip()
+    pending_dir = Path(pending_name).expanduser()
+    if not pending_dir.is_absolute():
+        pending_dir = out_dir / pending_dir
+    pending_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        from cpa_remote import retry_pending_auth_files
+        pre_remote = retry_pending_auth_files(out_dir, cfg, log_callback=log)
+    except Exception as e:  # noqa: BLE001
+        pre_remote = {"ok": False, "error": str(e), "pending": []}
+        log(f"[cpa-remote] retry hook failed: {e}")
     log(
-        f"[cpa] mint OIDC for {email} -> {out_dir} proxy={proxy or '(none)'} "
+        f"[cpa] mint OIDC for {email} -> {pending_dir} proxy={proxy or '(none)'} "
+        f"sso={'yes' if sso_val else 'no'} auth_code={prefer_auth_code} "
         f"cookies={len(use_cookies) if isinstance(use_cookies, list) else (1 if use_cookies else 0)} "
         f"reuse={reuse_browser}"
     )
@@ -166,7 +196,7 @@ def export_cpa_xai_for_account(
     result = mint_and_export(
         email=email,
         password=password,
-        auth_dir=out_dir,
+        auth_dir=pending_dir,
         page=reuse_page,
         proxy=proxy or None,
         headless=headless,
@@ -174,9 +204,15 @@ def export_cpa_xai_for_account(
         headers=cpa_headers,
         probe=probe,
         probe_chat=probe_chat,
+        probe_strict=probe_strict,
+        live_inspect=live_inspect,
         browser_timeout_sec=timeout,
         force_standalone=force_standalone,
         cookies=use_cookies,
+        sso=sso_val or None,
+        prefer_auth_code=prefer_auth_code,
+        require_cli_referrer=require_cli_referrer,
+        allow_device_fallback=allow_device_fallback,
         reuse_browser=reuse_browser,
         recycle_every=recycle_every,
         log=_log,
@@ -209,6 +245,20 @@ def export_cpa_xai_for_account(
         except Exception as e:  # noqa: BLE001
             log(f"[cpa] server upload failed: {e}")
             result["upload_error"] = str(e)
+
+    if result.get("ok") and result.get("path"):
+        try:
+            from cpa_remote import retry_pending_auth_files
+            result["remote_upload"] = retry_pending_auth_files(out_dir, cfg, log_callback=log)
+            moved = result["remote_upload"].get("moved") or {}
+            current_name = Path(result["path"]).name
+            if current_name in moved:
+                result["path"] = moved[current_name]
+        except Exception as e:  # noqa: BLE001
+            log(f"[cpa-remote] upload hook failed: {e}")
+            result["remote_upload"] = {"ok": False, "error": str(e), "pending": [Path(result["path"]).name]}
+    else:
+        result["remote_upload"] = pre_remote
 
     # failure log under register dir
     if not result.get("ok"):
