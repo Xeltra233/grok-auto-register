@@ -129,9 +129,8 @@ def build_cpa_xai_auth(
 ) -> dict[str, Any]:
     """Build a CPA-importable xAI OAuth auth object.
 
-    Output matches CLIProxyAPI internal/auth/xai/token.go TokenStorage struct.
-    Extra fields (disabled, headers) are appended after the native fields
-    so CPA can read them via its metadata system.
+    Default payload matches Aaron/CLIProxyAPI native oauth fields only.
+    Optional headers/disabled/extra are attached only when explicitly provided.
     """
     access_token = (access_token or "").strip()
     refresh_token = (refresh_token or "").strip()
@@ -174,9 +173,12 @@ def build_cpa_xai_auth(
         token_endpoint=token_endpoint,
     )
 
+    # Aaron-style: pure oauth JSON by default. Only attach optional metadata when
+    # the caller explicitly passes headers/disabled/extra.
     if disabled:
         payload["disabled"] = True
-    payload["headers"] = dict(headers) if headers is not None else dict(DEFAULT_CLIENT_HEADERS)
+    if headers is not None:
+        payload["headers"] = dict(headers)
     if extra:
         for k, v in extra.items():
             if k not in payload:

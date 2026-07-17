@@ -99,11 +99,13 @@ class MintPrefersAuthCodeTests(unittest.TestCase):
             self.assertEqual(result.get("referrer"), GROK_REFERRER)
             self.assertTrue(Path(result["path"]).is_file())
             payload = json.loads(Path(result["path"]).read_text(encoding="utf-8"))
-            self.assertEqual(payload.get("referrer"), GROK_REFERRER)
-            self.assertEqual(
-                payload.get("headers", {}).get("x-grok-client-identifier"),
-                "grok-pager",
-            )
+            # Aaron-style pure oauth JSON: no forced headers/extra metadata.
+            self.assertNotIn("headers", payload)
+            self.assertNotIn("referrer", payload)
+            self.assertEqual(payload.get("type"), "xai")
+            self.assertEqual(payload.get("auth_kind"), "oauth")
+            self.assertTrue(payload.get("access_token"))
+            self.assertTrue(payload.get("refresh_token"))
 
     def test_missing_referrer_does_not_write_pending(self):
         access = _fake_jwt({"exp": 9999999999, "iat": 1, "sub": "u"})
