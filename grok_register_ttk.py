@@ -2115,6 +2115,33 @@ _tls = threading.local()
 _cpa_async_threads: list = []
 
 
+
+def finalize_all_browsers(log_callback=None, reason="task end cleanup"):
+    """Close registration worker browsers and any leftover CPA mint browsers.
+
+    Mint browsers are thread-local/reused and are NOT closed when CPA mint threads
+    finish successfully; only recycle/failure paths quit them. Always sweep here.
+    """
+    if log_callback:
+        log_callback(f"[*] {reason}: close register browsers and CPA mint leftovers")
+    try:
+        stop_browser(log_callback=log_callback)
+    except Exception as exc:
+        if log_callback:
+            log_callback(f"[Debug] stop_browser during finalize failed: {exc}")
+    try:
+        from cpa_xai.browser_confirm import shutdown_mint_browsers
+
+        def _mint_log(msg):
+            if log_callback:
+                log_callback(f"[mint-clean] {msg}")
+
+        shutdown_mint_browsers(log=_mint_log)
+    except Exception as exc:
+        if log_callback:
+            log_callback(f"[Debug] mint browser finalize failed: {exc}")
+
+
 def _wait_cpa_async_threads(timeout=300, log_callback=None, skip_if_stopping=None):
     global _cpa_async_threads
     if skip_if_stopping and skip_if_stopping():
@@ -4523,6 +4550,8 @@ class GrokRegisterGUI:
         )
         try:
             concurrent = max(1, int(config.get("concurrent_count", 1) or 1))
+            # Never spawn more browser workers than registration targets.
+            concurrent = min(concurrent, max(1, int(count or 1)))
             self.log(f"[*] 日志级别: {get_log_level()} | 速度统计间隔: {int(interval)}s | 并发: {concurrent}")
             if concurrent <= 1:
                 self._run_single_worker(count, worker_id=0)
@@ -4541,6 +4570,8 @@ class GrokRegisterGUI:
                 log_callback=self.log,
                 skip_if_stopping=self.should_stop,
             )
+
+            finalize_all_browsers(log_callback=self.log, reason="GUI task end")
             self._set_running_ui(False)
             self.log(
                 f"[*] 任务结束。成功 {self.success_count} | 失败 {self.fail_count}"
@@ -4548,6 +4579,7 @@ class GrokRegisterGUI:
 
     def _run_concurrent_workers(self, total_count, worker_count):
         import queue
+        worker_count = min(max(1, int(worker_count or 1)), max(1, int(total_count or 1)))
         task_queue = queue.Queue()
         for idx in range(total_count):
             task_queue.put(idx)
@@ -5031,6 +5063,8 @@ def run_registration_cli(count):
         f"accounts_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
     )
     worker_count = max(1, int(config.get("concurrent_count", 1) or 1))
+    # Never spawn more browser workers than registration targets.
+    worker_count = min(worker_count, max(1, int(count or 1)))
     stats = {"success": 0, "fail": 0, "lock": threading.Lock()}
     stop_speed = threading.Event()
     interval = float(config.get("speed_log_interval_sec", 60) or 60)
