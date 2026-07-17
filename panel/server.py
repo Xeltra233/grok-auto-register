@@ -215,6 +215,17 @@ def _rewrite_goproxy_html(body: bytes) -> bytes:
 
     prefix = GOPROXY_UI_PREFIX
 
+    # kill absolute localhost webui urls first
+    try:
+        port = int((STATE.config or {}).get("goproxy_webui_port") or 17878)
+    except Exception:
+        port = 17878
+    for host in ("127.0.0.1", "localhost", "0.0.0.0"):
+        text = text.replace(f"http://{host}:{port}/", prefix + "/")
+        text = text.replace(f"http://{host}:{port}", prefix + "/")
+        text = text.replace(f"https://{host}:{port}/", prefix + "/")
+        text = text.replace(f"https://{host}:{port}", prefix + "/")
+
     # form/actions/links/redirects
     repls = [
         (r'action="/login"', f'action="{prefix}/login"'),
@@ -780,6 +791,10 @@ class PanelHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
+        # Panel UI must not stick on old JS that hardcodes 127.0.0.1 WebUI.
+        if str(target).endswith((".js", ".html", ".css")):
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+            self.send_header("Pragma", "no-cache")
         self.end_headers()
         self.wfile.write(data)
 
