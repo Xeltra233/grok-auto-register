@@ -660,8 +660,15 @@ class GoProxyManager:
                     low = (tail or "").lower()
                     if "address already in use" in low or "bind:" in low or "only one usage of each socket" in low:
                         hint = "\nHINT: 端口被占用。请停止旧 GoProxy，或改 config 里 goproxy_*_port。"
-                    elif "init storage" in low or "open db" in low or "sqlite" in low:
-                        hint = "\nHINT: 数据目录/数据库不可写。检查 /app/data/goproxy 挂载权限。"
+                    elif "cgo_enabled=0" in low or "go-sqlite3 requires cgo" in low or "this is a stub" in low:
+                        hint = (
+                            "\nHINT: 镜像里的 proxygo 还在用 go-sqlite3(需要 CGO)，但按 CGO_ENABLED=0 编译了。"
+                            "请重新 build 镜像（已改为 pure-Go modernc.org/sqlite）。"
+                        )
+                    elif "init storage" in low or "open db" in low or "readonly" in low or "permission denied" in low:
+                        hint = "\nHINT: 数据库打不开。检查 /app/data/goproxy 是否可写，或删掉损坏的 proxy.db 后重试。"
+                    elif "sqlite" in low:
+                        hint = "\nHINT: SQLite 初始化失败。优先重新 build 镜像；其次检查 data/goproxy 权限。"
                     elif "exec format" in low or "not found" in low:
                         hint = "\nHINT: 二进制架构不对或不可执行。请重新 build 镜像生成 Linux proxygo。"
                     self._last_error = (

@@ -117,6 +117,18 @@ func passwordHash(plain string) string {
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(plain)))
 }
 
+func envPort(key, fallback string) string {
+	val := strings.TrimSpace(os.Getenv(key))
+	if val == "" {
+		val = fallback
+	}
+	// accept "7778" or ":7778"
+	if !strings.HasPrefix(val, ":") {
+		val = ":" + val
+	}
+	return val
+}
+
 func DefaultConfig() *Config {
 	// 优先从环境变量 WEBUI_PASSWORD 读取密码，未设置时使用默认密码
 	password := os.Getenv("WEBUI_PASSWORD")
@@ -174,13 +186,13 @@ func DefaultConfig() *Config {
 	}
 
 	return &Config{
-		// 基础服务配置
-		WebUIPort:         ":7778",
+		// 基础服务配置（端口支持环境变量覆盖，便于 Windows 保留端口规避）
+		WebUIPort:         envPort("WEBUI_PORT", "17878"),
 		WebUIPasswordHash: passwordHash(password),
-		ProxyPort:         ":7777",
-		StableProxyPort:   ":7776",
-		SOCKS5Port:        ":7779",
-		StableSOCKS5Port:  ":7780",
+		ProxyPort:         envPort("RANDOM_PORT", "17877"),
+		StableProxyPort:   envPort("STABLE_PORT", "17876"),
+		SOCKS5Port:        envPort("SOCKS5_RANDOM_PORT", "17879"),
+		StableSOCKS5Port:  envPort("SOCKS5_STABLE_PORT", "17880"),
 		DBPath:            dataDir() + "proxy.db",
 		
 		// 代理认证配置

@@ -382,14 +382,14 @@ def build_goproxy_env(cfg, base_env=None):
     """Environment variables for launching the embedded GoProxy process."""
     env = dict(os.environ if base_env is None else base_env)
     env.update(pool_mode_to_goproxy_env(cfg.get("goproxy_pool_mode")))
-    env["WEBUI_PORT"] = str(_as_int(cfg.get("goproxy_webui_port"), 7778, minimum=1, maximum=65535))
-    env["RANDOM_PORT"] = str(_as_int(cfg.get("goproxy_http_random_port"), 7777, minimum=1, maximum=65535))
-    env["STABLE_PORT"] = str(_as_int(cfg.get("goproxy_http_stable_port"), 7776, minimum=1, maximum=65535))
+    env["WEBUI_PORT"] = str(_as_int(cfg.get("goproxy_webui_port"), 17878, minimum=1, maximum=65535))
+    env["RANDOM_PORT"] = str(_as_int(cfg.get("goproxy_http_random_port"), 17877, minimum=1, maximum=65535))
+    env["STABLE_PORT"] = str(_as_int(cfg.get("goproxy_http_stable_port"), 17876, minimum=1, maximum=65535))
     env["SOCKS5_RANDOM_PORT"] = str(
-        _as_int(cfg.get("goproxy_socks5_random_port"), 7779, minimum=1, maximum=65535)
+        _as_int(cfg.get("goproxy_socks5_random_port"), 17879, minimum=1, maximum=65535)
     )
     env["SOCKS5_STABLE_PORT"] = str(
-        _as_int(cfg.get("goproxy_socks5_stable_port"), 7780, minimum=1, maximum=65535)
+        _as_int(cfg.get("goproxy_socks5_stable_port"), 17880, minimum=1, maximum=65535)
     )
     env["WEBUI_PASSWORD"] = _as_str(cfg.get("goproxy_webui_password"), "goproxy")
     env["PROXY_AUTH_ENABLED"] = "true" if _as_bool(cfg.get("goproxy_proxy_auth_enabled"), False) else "false"
@@ -411,10 +411,10 @@ def describe_proxy_selection(cfg):
         "mode_label": GOPROXY_MODE_LABELS.get(mode, mode),
         "proxy_url": resolve_local_proxy_url(cfg, endpoint),
         "ports": {
-            "http_random": _as_int(cfg.get("goproxy_http_random_port"), 7777, minimum=1, maximum=65535),
-            "http_stable": _as_int(cfg.get("goproxy_http_stable_port"), 7776, minimum=1, maximum=65535),
-            "socks5_random": _as_int(cfg.get("goproxy_socks5_random_port"), 7779, minimum=1, maximum=65535),
-            "socks5_stable": _as_int(cfg.get("goproxy_socks5_stable_port"), 7780, minimum=1, maximum=65535),
-            "webui": _as_int(cfg.get("goproxy_webui_port"), 7778, minimum=1, maximum=65535),
+            "http_random": _as_int(cfg.get("goproxy_http_random_port"), 17877, minimum=1, maximum=65535),
+            "http_stable": _as_int(cfg.get("goproxy_http_stable_port"), 17876, minimum=1, maximum=65535),
+            "socks5_random": _as_int(cfg.get("goproxy_socks5_random_port"), 17879, minimum=1, maximum=65535),
+            "socks5_stable": _as_int(cfg.get("goproxy_socks5_stable_port"), 17880, minimum=1, maximum=65535),
+            "webui": _as_int(cfg.get("goproxy_webui_port"), 17878, minimum=1, maximum=65535),
         },
     }

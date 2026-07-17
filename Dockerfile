@@ -9,7 +9,7 @@ COPY third_party/goproxy/go.mod third_party/goproxy/go.sum ./
 RUN go mod download
 
 COPY third_party/goproxy/ ./
-# Vendored GoProxy uses modernc.org/sqlite; pure-Go build needs no gcc.
+# Must use pure-Go sqlite (modernc.org/sqlite). Do NOT build with mattn/go-sqlite3 under CGO_ENABLED=0.
 ENV CGO_ENABLED=0
 RUN mkdir -p /out/bin \
     && go build -trimpath -ldflags="-s -w" -o /out/bin/proxygo . \
