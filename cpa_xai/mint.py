@@ -181,6 +181,15 @@ def mint_and_export(
             "referrer": ref,
         }
 
+    # Aaron-style auth JSON: native oauth fields only by default.
+    # Keep optional headers/extra only when caller explicitly provides headers,
+    # or when debugging metadata is useful without polluting default import files.
+    extra_payload = None
+    if headers is not None:
+        extra_payload = {
+            "mint_flow": tokens.get("flow") or "unknown",
+            "referrer": ref,
+        }
     payload = build_cpa_xai_auth(
         email=email,
         access_token=access,
@@ -188,11 +197,9 @@ def mint_and_export(
         id_token=tokens.get("id_token"),
         expires_in=tokens.get("expires_in"),
         base_url=base_url,
+        token_endpoint=tokens.get("token_endpoint") or "",
         headers=headers,
-        extra={
-            "mint_flow": tokens.get("flow") or "unknown",
-            "referrer": ref,
-        },
+        extra=extra_payload,
     )
     path = write_cpa_xai_auth(auth_dir, payload)
     log(f"wrote {path} flow={tokens.get('flow')} referrer={ref!r}")

@@ -9,6 +9,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext
 import threading
 import datetime
+import tempfile
 import time
 import os
 import sys
@@ -907,8 +908,31 @@ def add_token_to_grok2api_local_pool(raw_token, email="", log_callback=None):
         entry = {"token": token, "tags": ["auto-register"], "note": email}
         pool.append(entry)
         data[pool_name] = pool
-        with open(token_file, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        # Aaron-style durable write: temp file + fsync + atomic replace.
+        directory = parent_dir or "."
+        fd, temp_path = tempfile.mkstemp(prefix=".token-", suffix=".tmp", dir=directory)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+                f.write("\n")
+                f.flush()
+                os.fsync(f.fileno())
+            try:
+                os.chmod(temp_path, 0o600)
+            except Exception:
+                pass
+            os.replace(temp_path, token_file)
+            temp_path = None
+            try:
+                os.chmod(token_file, 0o600)
+            except Exception:
+                pass
+        finally:
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.unlink(temp_path)
+                except OSError:
+                    pass
     if log_callback:
         log_callback(f"[+] 已写入 grok2api 本地池: {pool_name} ({token_file})")
     return True
@@ -1027,18 +1051,32 @@ def add_token_to_grok2api_remote_pool(raw_token, email="", log_callback=None):
 
 
 def add_token_to_grok2api_pools(raw_token, email="", log_callback=None):
-    if config.get("grok2api_auto_add_local", True):
+    """Aaron-style pool result: never raise out; account save remains primary."""
+    result = {
+        "local": {"enabled": bool(config.get("grok2api_auto_add_local", True)), "ok": None, "error": None},
+        "remote": {"enabled": bool(config.get("grok2api_auto_add_remote", False)), "ok": None, "error": None},
+    }
+    if result["local"]["enabled"]:
         try:
-            add_token_to_grok2api_local_pool(raw_token, email=email, log_callback=log_callback)
+            result["local"]["ok"] = bool(
+                add_token_to_grok2api_local_pool(raw_token, email=email, log_callback=log_callback)
+            )
         except Exception as exc:
+            result["local"]["ok"] = False
+            result["local"]["error"] = str(exc)
             if log_callback:
-                log_callback(f"[Debug] 写入 grok2api 本地池失败: {exc}")
-    if config.get("grok2api_auto_add_remote", False):
+                log_callback(f"[!] 写入 grok2api 本地池失败: {exc}")
+    if result["remote"]["enabled"]:
         try:
-            add_token_to_grok2api_remote_pool(raw_token, email=email, log_callback=log_callback)
+            result["remote"]["ok"] = bool(
+                add_token_to_grok2api_remote_pool(raw_token, email=email, log_callback=log_callback)
+            )
         except Exception as exc:
+            result["remote"]["ok"] = False
+            result["remote"]["error"] = str(exc)
             if log_callback:
-                log_callback(f"[Debug] 写入 grok2api 远端池失败: {exc}")
+                log_callback(f"[!] 写入 grok2api 远端池失败: {exc}")
+    return result
 
 
 def add_token_to_token_only_file(raw_token, log_callback=None):
@@ -1052,6 +1090,8 @@ def add_token_to_token_only_file(raw_token, log_callback=None):
         with _io_lock:
             with open(token_only_file, "a", encoding="utf-8") as f:
                 f.write(f"{token}\n")
+                f.flush()
+                os.fsync(f.fileno())
         if log_callback:
             log_callback(f"[+] 已写入 token 文件: {token_only_file}")
         return True
