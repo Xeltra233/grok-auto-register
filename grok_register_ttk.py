@@ -1527,8 +1527,11 @@ def create_browser_options():
                 options.set_user_agent(ua)
             except Exception:
                 options.set_argument(f"--user-agent={ua}")
-    if os.path.exists(EXTENSION_PATH):
-        options.add_extension(EXTENSION_PATH)
+    if os.path.isdir(EXTENSION_PATH):
+        try:
+            options.add_extension(EXTENSION_PATH)
+        except Exception as exc:
+            print(f"[Debug] add_extension failed: {exc}")
     return options
 
 
@@ -3043,6 +3046,11 @@ def start_browser(log_callback=None):
                 _set_browser(browser)
                 _set_browser_root_pid(_browser_process_id(browser))
                 page = _select_single_browser_tab(browser, log_callback=log_callback)
+                if log_callback:
+                    if os.path.isdir(EXTENSION_PATH):
+                        log_callback(f"[*] turnstilePatch extension loaded: {EXTENSION_PATH}")
+                    else:
+                        log_callback(f"[!] turnstilePatch extension missing: {EXTENSION_PATH}")
                 if log_callback and getattr(browser, "user_data_path", None):
                     log_callback(f"[Debug] 当前浏览器资料目录: {browser.user_data_path}")
                 if log_callback and attempt > 1:
@@ -3454,7 +3462,7 @@ def open_signup_page(log_callback=None, cancel_callback=None):
         start_browser(log_callback=log_callback)
         if log_callback:
             log_callback("[*] 浏览器已启动")
-        if not os.path.exists(EXTENSION_PATH) and log_callback:
+        if not os.path.isdir(EXTENSION_PATH) and log_callback:
             log_callback("[!] 未找到 turnstilePatch 扩展目录，Turnstile 辅助可能不可用")
     prepare_clean_browser_session(log_callback=log_callback, cancel_callback=cancel_callback)
     last_exc = None

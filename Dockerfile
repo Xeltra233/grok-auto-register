@@ -37,9 +37,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PANEL_PORT=8787 \
     PORT=8787 \
     GOPROXY_ENABLED=0 \
-    REGISTER_HEADLESS=1 \
-    BROWSER_HEADLESS=1 \
-    CPA_HEADLESS=1 \
+    DISPLAY=:99 \
     DEBIAN_FRONTEND=noninteractive \
     PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
@@ -62,6 +60,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpangocairo-1.0-0 \
     libxshmfence1 \
     tzdata \
+    xvfb \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -77,6 +76,8 @@ COPY --from=goproxy-builder /out/bin/proxygo /app/third_party/goproxy/bin/proxyg
 COPY --from=goproxy-builder /out/bin/sing-box /usr/local/bin/sing-box
 RUN chmod +x /app/third_party/goproxy/bin/proxygo /usr/local/bin/sing-box \
     && mkdir -p /app/data/goproxy /app/logs /app/cpa_auths \
+    && test -f /app/turnstilePatch/manifest.json \
+    && test -f /app/turnstilePatch/script.js \
     && ln -sf /app/third_party/goproxy/bin/proxygo /app/third_party/goproxy/bin/proxy-pool \
     && if head -c 2 /app/third_party/goproxy/bin/proxygo | grep -q MZ; then echo 'ERROR: proxygo is Windows PE; expected Linux ELF' >&2; exit 1; fi \
     && if [ ! -f /app/config/config.json ]; then \

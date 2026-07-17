@@ -19,6 +19,45 @@ if str(ROOT) not in sys.path:
 
 os.chdir(ROOT)
 
+
+def _ensure_virtual_display() -> None:
+    """Start Xvfb when running headed Chromium inside containers."""
+    display = (os.environ.get("DISPLAY") or "").strip()
+    if not display:
+        return
+    # If a real X server is already usable, keep it.
+    try:
+        import socket
+        # X11 abstract/local sockets vary; best-effort probe via xdpyinfo if present.
+        from shutil import which
+        if which("xdpyinfo"):
+            import subprocess
+            r = subprocess.run(["xdpyinfo"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+            if r.returncode == 0:
+                return
+    except Exception:
+        pass
+    # Spawn Xvfb for common container display :99
+    try:
+        from shutil import which
+        import subprocess
+        if which("Xvfb") is None:
+            print("[main] Xvfb not installed; headed browser may fail", flush=True)
+            return
+        # Avoid double-start
+        if Path("/tmp/.X99-lock").exists():
+            return
+        subprocess.Popen(
+            ["Xvfb", display, "-screen", "0", "1920x1080x24", "-nolisten", "tcp"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        print(f"[main] started Xvfb on DISPLAY={display}", flush=True)
+    except Exception as exc:
+        print(f"[main] Xvfb start failed: {exc}", flush=True)
+
+
+
 def _ensure_logs_dir() -> None:
     log_dir = ROOT / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -127,17 +166,27 @@ def _patch_runtime_config(host: str, port: int) -> None:
 
         if "cpa_headless" not in data:
             data["cpa_headless"] = True
-        # Container registration needs packaged Chromium + headless.
-        chromium = ROOT / "unused"
+        # Container registration needs packaged Chromium.
+        # Headless is only forced when no DISPLAY is available.
         for cand in ("/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome"):
             if Path(cand).is_file():
                 data.setdefault("browser_binary_path", cand)
                 break
-        data.setdefault("browser_headless", True)
-        data.setdefault("register_headless", True)
-        data.setdefault("cpa_headless", True)
-        if _truthy(os.environ.get("CPA_HEADLESS")):
-            data["cpa_headless"] = True
+        no_display = not str(os.environ.get("DISPLAY") or "").strip()
+        default_headless = no_display
+        # Prefer current runtime display state over stale mounted config.
+        if "BROWSER_HEADLESS" in os.environ:
+            data["browser_headless"] = _truthy(os.environ.get("BROWSER_HEADLESS"))
+        else:
+            data["browser_headless"] = default_headless
+        if "REGISTER_HEADLESS" in os.environ:
+            data["register_headless"] = _truthy(os.environ.get("REGISTER_HEADLESS"))
+        else:
+            data["register_headless"] = default_headless
+        if "CPA_HEADLESS" in os.environ:
+            data["cpa_headless"] = _truthy(os.environ.get("CPA_HEADLESS"))
+        else:
+            data["cpa_headless"] = default_headless
 
         cfg_path.parent.mkdir(parents=True, exist_ok=True)
         cfg_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -148,6 +197,7 @@ def _patch_runtime_config(host: str, port: int) -> None:
 
 def main() -> int:
     host, port = _cloud_host_port()
+    _ensure_virtual_display()
     _patch_runtime_config(host, port)
 
     if os.environ.get("GROK_PANEL_PASSWORD"):
