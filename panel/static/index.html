@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Grok Auto Panel</title>
-  <link rel="stylesheet" href="/static/styles.css?v=goproxy-path-3" />
+  <link rel="stylesheet" href="/static/styles.css?v=manual-count-1" />
 </head>
 <body>
   <div class="bg-orb orb-a"></div>
@@ -64,7 +64,7 @@
       <section id="tab-register" class="tab-panel">
         <div class="card glass">
           <h2>注册设置</h2>
-          <p class="section-sub">注册相关参数统一在这里改。远端账号池低于“触发阈值”才开始补注册，并一次补到“停止目标”，中间缺口用多线程一次性干完。</p>
+          <p class="section-sub">注册相关参数统一在这里改。手动注册看「手动注册目标数」；自动补货看「触发阈值 / 停止目标 / 巡检间隔」。两者不是一回事。</p>
           <div class="form-grid">
             <label>邮箱提供商
               <select id="cfgEmailProvider">
@@ -75,7 +75,8 @@
                 <option value="icloud_hme">icloud_hme</option>
               </select>
             </label>
-<label>线程数 / 并发数（补货时按目标缺口一次开满，受此限制）<input id="cfgConcurrent" type="number" min="1" /></label>
+<label>手动注册目标数（点“手动开始注册”时注册多少个）<input id="cfgRegisterCount" type="number" min="1" /></label>
+            <label>并发线程数（同时跑几个，手动/补货共用上限）<input id="cfgConcurrent" type="number" min="1" /></label>
             <label>浏览器重启间隔<input id="cfgBrowserRestart" type="number" min="1" /></label>
             <label>日志级别
               <select id="cfgLogLevel">
@@ -132,10 +133,10 @@
             <label>单次最多测活数量（0=全部）<input id="cfgRemoteLiveMax" type="number" min="0" /></label>
             <label>远端测活并发批次（默认 6）<input id="cfgRemoteLiveBatch" type="number" min="1" max="32" /></label>
             </div>
-          <p class="action-hint">操作说明：保存设置不会启动任务；“手动开始注册”按线程启动；“账号池补到停止目标”按 触发线→停止目标 的整段缺口补货。</p>
+          <p class="action-hint">操作说明：保存设置不会启动任务；“手动开始注册”按「手动注册目标数」启动，并发线程只控制同时跑几个；“账号池补到停止目标”按 触发线→停止目标 的整段缺口补货，与手动目标数无关。</p>
           <div class="row actions">
             <button id="btnSaveRegister" class="btn primary">保存设置</button>
-            <button id="btnStartManualRegister" class="btn primary">手动开始注册（按线程）</button>
+            <button id="btnStartManualRegister" class="btn primary">手动开始注册（按目标数）</button>
             <button id="btnPoolRefill" class="btn">账号池补到停止目标</button>
             <button id="btnPoolCheck" class="btn">仅检查账号池</button>
             <button id="btnRemoteLiveCheck" class="btn">立即远端测活</button>
@@ -223,6 +224,6 @@
   </div>
 
   <div id="toastStack" class="toast-stack" aria-live="polite" aria-relevant="additions"></div>
-  <script src="/static/app.js?v=goproxy-path-3"></script>
+  <script src="/static/app.js?v=manual-count-2"></script>
 </body>
 </html>

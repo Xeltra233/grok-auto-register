@@ -304,7 +304,7 @@ function markFormsDirty() {
 
 function wireConfigFormDirtyTracking() {
   const ids = [
-    "cfgEmailProvider", "cfgConcurrent", "cfgBrowserRestart", "cfgLogLevel", "cfgEnableNsfw",
+    "cfgEmailProvider", "cfgRegisterCount", "cfgConcurrent", "cfgBrowserRestart", "cfgLogLevel", "cfgEnableNsfw",
     "cfgDuckmailKey", "cfgFreemailBase", "cfgFreemailJwt", "cfgFreemailDomain",
     "cfgIcloudBase", "cfgIcloudAccount", "cfgIcloudLabel",
     "cfgCfBase", "cfgCfKey", "cfgCfMode",
@@ -333,6 +333,7 @@ function applyConfigForms(cfg = {}, opts = {}) {
   if (state.formsDirty && !force) return;
   if (state.formsHydrated && !force) return;
   setValue("cfgEmailProvider", cfg.email_provider || "duckmail");
+  setValue("cfgRegisterCount", cfg.register_count ?? 1);
   setValue("cfgConcurrent", cfg.concurrent_count ?? 1);
   setValue("cfgBrowserRestart", cfg.browser_restart_every ?? 10);
   setValue("cfgLogLevel", cfg.log_level || "info");
@@ -380,6 +381,7 @@ function applyConfigForms(cfg = {}, opts = {}) {
 function collectRegisterConfig() {
   return {
     email_provider: $("cfgEmailProvider").value,
+    register_count: Number(($("cfgRegisterCount") && $("cfgRegisterCount").value) || 1),
     concurrent_count: Number($("cfgConcurrent").value || 1),
     browser_restart_every: Number($("cfgBrowserRestart").value || 10),
     log_level: $("cfgLogLevel").value,
@@ -487,8 +489,11 @@ function applyOverview(data, opts = {}) {
   $("registerStatus").textContent = JSON.stringify({
     账号池: data.pool,
     自动补货: data.pool_autoreg,
-    注册数量: data.config?.register_count,
-    并发: data.config?.concurrent_count,
+    手动注册目标数: data.config?.register_count,
+    并发线程: data.config?.concurrent_count,
+    自动补货触发线: data.config?.pool_autoreg_min_count,
+    自动补货停止目标: data.config?.pool_autoreg_target_count,
+    自动补货巡检间隔秒: data.config?.pool_autoreg_interval_sec,
     邮箱: data.config?.email_provider,
     远端测活: data.remote_live,
   }, null, 2);
@@ -600,10 +605,11 @@ async function main() {
   if ($("btnStartManualRegister")) $("btnStartManualRegister").onclick = async () => withBusy($("btnStartManualRegister"), async () => {
     try {
       await api("/api/config", { method: "POST", body: JSON.stringify(collectRegisterConfig()) });
-      const conc = Number($("cfgConcurrent").value || 1);
-      const res = await api("/api/register/start", { method: "POST", body: JSON.stringify({ count: conc }) });
-      $("registerStatus").textContent = JSON.stringify(res, null, 2);
-      if (res.triggered) toast(`目标 ${res.register_count} 个，并发 ${res.concurrent_count || conc}`, true, { title: "手动注册已启动" });
+      const target = Math.max(1, Number(($("cfgRegisterCount") && $("cfgRegisterCount").value) || 1));
+      const conc = Math.max(1, Number(($("cfgConcurrent") && $("cfgConcurrent").value) || 1));
+      const res = await api("/api/register/start", { method: "POST", body: JSON.stringify({ count: target, register_count: target }) });
+      $("registerStatus").textContent = JSON.stringify({ 模式: "手动注册", 目标数: target, 并发线程: conc, 结果: res }, null, 2);
+      if (res.triggered) toast(`手动目标 ${res.register_count || target} 个，并发 ${res.concurrent_count || Math.min(conc, target)}`, true, { title: "手动注册已启动" });
       else toast(res.reason || "未启动", false, { title: "手动注册未启动" });
       await refresh(false);
     } catch (e) { toast(e.message, false); }
