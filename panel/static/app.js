@@ -146,7 +146,13 @@ async function api(path, opts = {}) {
   }
   if (ct.includes("application/json")) {
     const data = await res.json();
-    if (!res.ok || data.ok === false) throw new Error(data.error || res.statusText);
+    if (!res.ok || data.ok === false) {
+      const parts = [data.error || res.statusText || "request failed"];
+      if (data.log_tail) parts.push("---- log tail ----", String(data.log_tail));
+      if (data.busy_ports) parts.push("busy_ports=" + JSON.stringify(data.busy_ports));
+      if (data.hint) parts.push(String(data.hint));
+      throw new Error(parts.filter(Boolean).join("\n"));
+    }
     return data;
   }
   if (!res.ok) throw new Error(res.statusText);
@@ -658,9 +664,27 @@ async function main() {
       await afterMutation(`日志清理 ${res.deleted_count || 0} 个`);
     } catch (e) { toast(e.message, false); }
   };
-  $("btnProxyStart").onclick = async () => withBusy($("btnProxyStart"), async () => { try { await api("/api/goproxy/start", { method: "POST", body: "{}" }); await afterMutation("本地代理启动请求已发送"); } catch (e) { toast(e.message, false); } }, "启动中...");
+  $("btnProxyStart").onclick = async () => withBusy($("btnProxyStart"), async () => {
+    try {
+      const res = await api("/api/goproxy/start", { method: "POST", body: "{}" });
+      if ($("proxyStatus")) $("proxyStatus").textContent = JSON.stringify(res, null, 2);
+      await afterMutation(res.already_running ? "本地代理已在运行" : "本地代理已启动");
+    } catch (e) {
+      if ($("proxyStatus")) $("proxyStatus").textContent = String(e.message || e);
+      toast(e.message, false, { title: "本地代理启动失败", ttl: 8000 });
+    }
+  }, "启动中...");
   $("btnProxyStop").onclick = async () => withBusy($("btnProxyStop"), async () => { try { await api("/api/goproxy/stop", { method: "POST", body: "{}" }); await afterMutation("本地代理停止请求已发送"); } catch (e) { toast(e.message, false); } }, "停止中...");
-  $("btnProxyRestart").onclick = async () => withBusy($("btnProxyRestart"), async () => { try { await api("/api/goproxy/restart", { method: "POST", body: "{}" }); await afterMutation("本地代理重启请求已发送"); } catch (e) { toast(e.message, false); } }, "重启中...");
+  $("btnProxyRestart").onclick = async () => withBusy($("btnProxyRestart"), async () => {
+    try {
+      const res = await api("/api/goproxy/restart", { method: "POST", body: "{}" });
+      if ($("proxyStatus")) $("proxyStatus").textContent = JSON.stringify(res, null, 2);
+      await afterMutation("本地代理已重启");
+    } catch (e) {
+      if ($("proxyStatus")) $("proxyStatus").textContent = String(e.message || e);
+      toast(e.message, false, { title: "本地代理重启失败", ttl: 8000 });
+    }
+  }, "重启中...");
   if ($("btnOpenWebui")) {
     // Prefer real same-origin href so browser uses current host, never 127.0.0.1.
     try { $("btnOpenWebui").setAttribute("href", goproxyWebuiUrl()); } catch (e) {}

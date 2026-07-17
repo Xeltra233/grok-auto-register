@@ -97,6 +97,20 @@ def _tail_text(path: str, max_chars: int = 1200) -> str:
         return ""
 
 
+def _ports_in_use(host: str, ports: dict) -> dict:
+    """Return {name: port} for ports that already accept connections."""
+    busy = {}
+    h = _probe_host(host)
+    for name, port in (ports or {}).items():
+        try:
+            p = int(port)
+        except Exception:
+            continue
+        if _port_open(h, p, timeout=0.05):
+            busy[str(name)] = p
+    return busy
+
+
 def _is_windows_pe(path: str) -> bool:
     try:
         with open(path, "rb") as f:
@@ -523,6 +537,9 @@ class GoProxyManager:
         with self._lock:
             if not self.config.get("goproxy_enabled", True):
                 return {"ok": False, "error": "goproxy_enabled is false", "status": self.status()}
+            # drop dead child handle so restart can proceed cleanly
+            if self._proc is not None and self._proc.poll() is not None:
+                self._proc = None
             if self._proc is not None and self._proc.poll() is None:
                 return {"ok": True, "already_running": True, "status": self.status()}
 
@@ -573,6 +590,27 @@ class GoProxyManager:
                 except Exception:
                     pass
 
+            planned_ports = {
+                "webui": int(self.config.get("goproxy_webui_port") or 17878),
+                "http_random": int(self.config.get("goproxy_http_random_port") or 17877),
+                "http_stable": int(self.config.get("goproxy_http_stable_port") or 17876),
+                "socks5_random": int(self.config.get("goproxy_socks5_random_port") or 17879),
+                "socks5_stable": int(self.config.get("goproxy_socks5_stable_port") or 17880),
+            }
+            busy = _ports_in_use(self.config.get("goproxy_host"), planned_ports)
+            if busy:
+                self._last_error = (
+                    "GoProxy ports already in use before start: "
+                    + ", ".join(f"{k}={v}" for k, v in busy.items())
+                    + ". Stop the old process or change goproxy_*_port in config."
+                )
+                return {
+                    "ok": False,
+                    "error": self._last_error,
+                    "busy_ports": busy,
+                    "status": self.status(),
+                }
+
             log_path = os.path.join(data_dir, "goproxy.manager.log")
             try:
                 if self._log_fp:
@@ -618,9 +656,18 @@ class GoProxyManager:
                     except Exception:
                         pass
                     tail = _tail_text(log_path, 1500)
+                    hint = ""
+                    low = (tail or "").lower()
+                    if "address already in use" in low or "bind:" in low or "only one usage of each socket" in low:
+                        hint = "\nHINT: 端口被占用。请停止旧 GoProxy，或改 config 里 goproxy_*_port。"
+                    elif "init storage" in low or "open db" in low or "sqlite" in low:
+                        hint = "\nHINT: 数据目录/数据库不可写。检查 /app/data/goproxy 挂载权限。"
+                    elif "exec format" in low or "not found" in low:
+                        hint = "\nHINT: 二进制架构不对或不可执行。请重新 build 镜像生成 Linux proxygo。"
                     self._last_error = (
-                        f"GoProxy exited early with code {code}; log={log_path}"
+                        f"GoProxy exited early with code {code}; binary={binary}; magic={magic}; log={log_path}"
                         + (f"\n---- log tail ----\n{tail}" if tail else "")
+                        + hint
                     )
                     return {
                         "ok": False,

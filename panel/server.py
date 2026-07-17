@@ -778,9 +778,18 @@ class PanelHandler(BaseHTTPRequestHandler):
         # Ensure local webui is up before proxying; return friendly page instead of bare 502.
         ensured = _ensure_goproxy_webui(timeout=8.0)
         if not ensured.get("ok") and not _goproxy_webui_ready():
+            detail_parts = []
+            if ensured.get("hint"):
+                detail_parts.append(str(ensured.get("hint")))
+            if ensured.get("log_tail"):
+                detail_parts.append("---- log tail ----\n" + str(ensured.get("log_tail")))
+            elif isinstance(ensured.get("result"), dict) and ensured["result"].get("log_tail"):
+                detail_parts.append("---- log tail ----\n" + str(ensured["result"].get("log_tail")))
+            elif ensured.get("result"):
+                detail_parts.append(str(ensured.get("result"))[:1500])
             body = _goproxy_unavailable_html(
                 ensured.get("error") or "无法连接本地 GoProxy WebUI",
-                detail=str(ensured.get("hint") or ensured.get("result") or ""),
+                detail="\n\n".join(detail_parts),
             )
             self.send_response(503)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -1006,11 +1015,15 @@ class PanelHandler(BaseHTTPRequestHandler):
             res["mode"] = "pool_refill"
             return _json_response(self, 200, res)
         if path == "/api/goproxy/start":
-            return _json_response(self, 200, STATE.manager.start(build_if_missing=bool(body.get("build", True))))
+            res = STATE.manager.start(build_if_missing=bool(body.get("build", True)))
+            code = 200 if res.get("ok") else 500
+            return _json_response(self, code, res)
         if path == "/api/goproxy/stop":
             return _json_response(self, 200, STATE.manager.stop())
         if path == "/api/goproxy/restart":
-            return _json_response(self, 200, STATE.manager.restart(build_if_missing=bool(body.get("build", True))))
+            res = STATE.manager.restart(build_if_missing=bool(body.get("build", True)))
+            code = 200 if res.get("ok") else 500
+            return _json_response(self, code, res)
         if path == "/api/goproxy/mode":
             mode = normalize_pool_mode(body.get("mode") or body.get("goproxy_pool_mode"))
             res = STATE.manager.set_pool_mode(mode, restart_if_running=bool(body.get("restart", True)))
