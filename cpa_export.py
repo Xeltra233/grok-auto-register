@@ -111,22 +111,22 @@ def export_cpa_xai_for_account(
         ).strip()
     # Default headed: headless is frequently Cloudflare-blocked on accounts.x.ai
     headless = bool(cfg.get("cpa_headless", False))
-    probe = bool(cfg.get("cpa_probe_after_write", True))
+    probe = bool(cfg.get("cpa_probe_after_write", False))
     probe_chat = bool(cfg.get("cpa_probe_chat", False))
     probe_strict = bool(cfg.get("cpa_probe_strict", False))
-    live_inspect = bool(cfg.get("live_inspect_enabled", cfg.get("cpa_live_inspect", True)))
+    live_inspect = bool(cfg.get("live_inspect_enabled", cfg.get("cpa_live_inspect", False)))
     # Success gate: live inspect pass is required before keep/push.
-    if bool(cfg.get("success_require_live", True)):
+    if bool(cfg.get("success_require_live", False)):
         live_inspect = True
     timeout = float(cfg.get("cpa_mint_timeout_sec", 240))
     base_url = cfg.get("cpa_base_url") or "https://cli-chat-proxy.grok.com/v1"
     cpa_headers = cfg.get("cpa_headers") or None
-    force_standalone = bool(cfg.get("cpa_force_standalone", False))
+    force_standalone = bool(cfg.get("cpa_force_standalone", True))
     cookie_inject = bool(cfg.get("cpa_mint_cookie_inject", True))
     reuse_browser = bool(cfg.get("cpa_mint_browser_reuse", True))
     recycle_every = int(cfg.get("cpa_mint_browser_recycle_every", 15) or 0)
-    prefer_auth_code = bool(cfg.get("cpa_prefer_auth_code", True))
-    require_cli_referrer = bool(cfg.get("cpa_require_cli_referrer", True))
+    prefer_auth_code = bool(cfg.get("cpa_prefer_auth_code", False))
+    require_cli_referrer = bool(cfg.get("cpa_require_cli_referrer", False))
     allow_device_fallback = bool(cfg.get("cpa_allow_device_fallback", True))
 
     reuse_page = None if force_standalone else page

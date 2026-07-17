@@ -160,6 +160,8 @@ class MintPrefersAuthCodeTests(unittest.TestCase):
                     password="pw",
                     auth_dir=pending,
                     sso="sso",
+                    prefer_auth_code=True,
+                    require_cli_referrer=True,
                     probe=True,
                     probe_strict=True,
                     live_inspect=False,
@@ -207,12 +209,70 @@ class MintPrefersAuthCodeTests(unittest.TestCase):
                     password="pw",
                     auth_dir=pending,
                     sso="sso",
+                    prefer_auth_code=True,
+                    require_cli_referrer=False,
                     probe=True,
                     probe_strict=False,
+                    live_inspect=False,
                 )
             self.assertTrue(result["ok"])
             self.assertIn("probe_warning", result)
             self.assertTrue(list(pending.glob("xai-*.json")))
+
+
+
+
+class MintDefaultsToDeviceCodeTests(unittest.TestCase):
+    def test_default_prefers_device_code_without_auth_code_flag(self):
+        access = _fake_jwt(
+            {
+                "exp": 9999999999,
+                "iat": 9999990000,
+                "sub": "user-2",
+            }
+        )
+        tokens = {
+            "access_token": access,
+            "refresh_token": "refresh-device",
+            "id_token": None,
+            "expires_in": 9999,
+            "token_type": "Bearer",
+            "user_code": "ABCD",
+            "flow": "device_code",
+            "referrer": None,
+            "raw": {},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            pending = Path(tmp) / "pending"
+            pending.mkdir()
+            with patch.object(mint_mod, "mint_tokens_from_sso") as m_sso, \
+                    patch.object(mint_mod, "mint_with_browser", return_value=tokens) as m_browser, \
+                    patch.object(mint_mod, "probe_models", return_value={
+                        "ok": True, "has_grok_45": True, "model_ids": ["grok-4.5"],
+                    }), \
+                    patch.object(mint_mod, "inspect_access_token", return_value={
+                        "ok": True,
+                        "healthy": True,
+                        "classification": "healthy",
+                        "action": "keep",
+                        "reason": "mock live pass",
+                    }), \
+                    patch.object(mint_mod, "is_live_pass", return_value=True):
+                result = mint_mod.mint_and_export(
+                    email="b@example.com",
+                    password="pw",
+                    auth_dir=pending,
+                    sso="sso-cookie-value",
+                    # defaults: prefer_auth_code=False, require_cli_referrer=False
+                    probe=False,
+                    live_inspect=False,
+                    proxy=None,
+                )
+
+            m_sso.assert_not_called()
+            m_browser.assert_called_once()
+            self.assertTrue(result["ok"])
+            self.assertEqual(result.get("flow"), "device_code")
 
 
 if __name__ == "__main__":

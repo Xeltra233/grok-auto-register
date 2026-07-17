@@ -83,14 +83,14 @@ DEFAULT_CONFIG = {
     "cpa_auth_dir": "cpa_auths",
     "cpa_proxy": "",
     "cpa_headless": False,
-    "cpa_probe_after_write": True,
+    "cpa_probe_after_write": False,
     "cpa_probe_strict": False,
-    "cpa_prefer_auth_code": True,
-    "cpa_require_cli_referrer": True,
+    "cpa_prefer_auth_code": False,
+    "cpa_require_cli_referrer": False,
     "cpa_allow_device_fallback": True,
     "cpa_mint_timeout_sec": 240,
     "cpa_base_url": "https://cli-chat-proxy.grok.com/v1",
-    "cpa_force_standalone": False,
+    "cpa_force_standalone": True,
     "cpa_mint_cookie_inject": True,
     "cpa_mint_browser_reuse": True,
     "cpa_mint_browser_recycle_every": 15,
@@ -149,8 +149,8 @@ DEFAULT_CONFIG = {
     "log_max_total_mb": 512,
     "log_cleanup_interval_sec": 3600,
     "log_cleanup_globs": "*.log,*.err,live-*.log",
-    "live_inspect_enabled": True,
-    "success_require_live": True,
+    "live_inspect_enabled": False,
+    "success_require_live": False,
     "pool_autoreg_enabled": False,
     "pool_autoreg_min_count": 5,
     "pool_autoreg_batch": 3,
@@ -1094,57 +1094,124 @@ def upload_to_cpa_server(local_path, log_callback=None):
 
 
 def persist_successful_account(email, password, sso, accounts_output_file, log_callback=None, profile=None):
-    """Write local account artifacts only after live-inspect success gate."""
-    line = f"{email}----{password or ''}----{sso}\n"
+    """Aaron-style durable save: fsync account line, pending queue on failure, then token pools."""
+    from account_outputs import append_account_line, queue_unsaved_account
+
+    saved = False
+    pending_saved = False
+    save_error = ""
     try:
         with _io_lock:
-            with open(accounts_output_file, "a", encoding="utf-8") as f:
-                f.write(line)
+            append_account_line(accounts_output_file, email, password or "", sso)
+        saved = True
     except Exception as file_exc:
+        save_error = str(file_exc)
         if log_callback:
-            log_callback(f"[Debug] 写入账号文件失败: {file_exc}")
-    add_token_to_grok2api_pools(sso, email=email, log_callback=log_callback)
-    add_token_to_token_only_file(sso, log_callback=log_callback)
-    return {"email": email, "sso": sso, "profile": profile or {}}
+            log_callback(f"[!] 账号已注册但主结果文件保存失败: {file_exc}")
+        try:
+            with _io_lock:
+                pending_saved = bool(
+                    queue_unsaved_account(
+                        accounts_output_file,
+                        {
+                            "email": email,
+                            "password": password or "",
+                            "sso": sso,
+                            "profile": profile or {},
+                        },
+                        save_error,
+                    )
+                )
+        except Exception as pending_exc:
+            pending_saved = False
+            if log_callback:
+                log_callback(f"[!] pending 队列写入异常: {pending_exc}")
+        if log_callback:
+            if pending_saved:
+                log_callback("[!] 未保存账号已写入 pending 队列，等待人工重试")
+            else:
+                log_callback("[!] pending 队列也写入失败，请立即复制当前账号信息")
+
+    try:
+        pools = add_token_to_grok2api_pools(sso, email=email, log_callback=log_callback)
+        if not isinstance(pools, dict):
+            pools = {"result": pools}
+    except Exception as pool_exc:
+        if log_callback:
+            log_callback(f"[!] token 入池后处理异常，账号结果已保留: {pool_exc}")
+        pools = {"error": str(pool_exc)}
+    try:
+        add_token_to_token_only_file(sso, log_callback=log_callback)
+    except Exception as token_exc:
+        if log_callback:
+            log_callback(f"[!] tokens.txt 写入异常，账号结果已保留: {token_exc}")
+    return {
+        "email": email,
+        "sso": sso,
+        "profile": profile or {},
+        "saved": saved,
+        "pending_saved": pending_saved,
+        "save_error": save_error,
+        "pools": pools,
+    }
 
 
 def run_success_live_gate(email, password, sso, log_callback=None, page=None):
-    """Require grok-inspection style live pass before local save / push."""
-    require_live = bool(config.get("success_require_live", True))
-    live_enabled = bool(config.get("live_inspect_enabled", True))
+    """Post-registration CPA/live step (Aaron-style: does not block account save by default).
+
+    Default: always ok=True so account is persisted first; CPA failure is warning-only.
+    If success_require_live=True, restore hard gate semantics.
+    """
+    require_live = bool(config.get("success_require_live", False))
+    live_enabled = bool(config.get("live_inspect_enabled", False))
     cpa_enabled = bool(config.get("cpa_export_enabled", True))
 
-    if not require_live and not live_enabled:
-        if cpa_enabled:
-            try:
-                r = export_cpa_xai_for_account(
-                    email, password or "", sso=sso, log_callback=log_callback, page=page
-                )
-                return {"ok": True, "skipped": True, "cpa_result": r, "live": (r or {}).get("live_inspect")}
-            except Exception as exc:
-                if log_callback:
-                    log_callback(f"[!] CPA 导出异常（已跳过测活门槛）: {exc}")
-                return {"ok": True, "skipped": True, "cpa_result": None, "live": None, "error": str(exc)}
+    if not cpa_enabled and not require_live and not live_enabled:
         return {"ok": True, "skipped": True, "cpa_result": None, "live": None}
 
     if cpa_enabled:
         if log_callback:
-            log_callback("[*] 成功门槛: CPA mint + 测活通过后才本地保存/推送")
-        result = export_cpa_xai_for_account(
-            email,
-            password or "",
-            sso=sso,
-            log_callback=log_callback,
-            page=page,
-        )
+            if require_live:
+                log_callback("[*] 成功门槛: CPA mint + 测活通过后才本地保存/推送")
+            else:
+                log_callback("[*] CPA mint + 凭证转换（失败不阻断账号保存）")
+        try:
+            result = export_cpa_xai_for_account(
+                email,
+                password or "",
+                sso=sso,
+                log_callback=log_callback,
+                page=page,
+            )
+        except Exception as exc:
+            if log_callback:
+                log_callback(f"[!] CPA 导出异常，账号结果仍将保留: {exc}")
+            if require_live:
+                return {"ok": False, "cpa_result": None, "live": None, "error": str(exc)}
+            return {"ok": True, "warning": True, "cpa_result": None, "live": None, "error": str(exc)}
+
         if result.get("ok"):
             if log_callback:
-                log_callback(f"[+] 测活通过，已导出/保存: {result.get('path', '')}")
+                log_callback(f"[+] CPA 导出成功: {result.get('path', '')}")
             return {"ok": True, "cpa_result": result, "live": result.get("live_inspect")}
-        err = result.get("error") or "live/CPA gate failed"
+
+        err = result.get("error") or "CPA export failed"
+        if require_live:
+            if log_callback:
+                log_callback(f"[!] 测活/CPA 门槛失败，不保存不推送: {err}")
+            return {"ok": False, "cpa_result": result, "live": result.get("live_inspect"), "error": err}
         if log_callback:
-            log_callback(f"[!] 测活/CPA 门槛失败，不保存不推送: {err}")
-        return {"ok": False, "cpa_result": result, "live": result.get("live_inspect"), "error": err}
+            log_callback(f"[!] CPA 导出失败，账号结果已保留: {err}")
+        return {
+            "ok": True,
+            "warning": True,
+            "cpa_result": result,
+            "live": result.get("live_inspect"),
+            "error": err,
+        }
+
+    if not require_live and not live_enabled:
+        return {"ok": True, "skipped": True, "cpa_result": None, "live": None}
 
     if log_callback:
         log_callback("[*] 成功门槛: SSO->access_token 测活（未开启 CPA 导出）")
@@ -1165,16 +1232,18 @@ def run_success_live_gate(email, password, sso, log_callback=None, page=None):
             )
         if is_live_pass(live):
             return {"ok": True, "cpa_result": None, "live": live}
-        return {
-            "ok": False,
-            "cpa_result": None,
-            "live": live,
-            "error": f"live inspect failed: {live.get('classification')}: {live.get('reason')}",
-        }
+        err = f"live inspect failed: {live.get('classification')}: {live.get('reason')}"
+        if require_live:
+            return {"ok": False, "cpa_result": None, "live": live, "error": err}
+        if log_callback:
+            log_callback(f"[!] 测活失败，账号结果已保留: {err}")
+        return {"ok": True, "warning": True, "cpa_result": None, "live": live, "error": err}
     except Exception as exc:
         if log_callback:
-            log_callback(f"[!] 测活流程异常: {exc}")
-        return {"ok": False, "cpa_result": None, "live": None, "error": str(exc)}
+            log_callback(f"[!] 测活流程异常，账号结果已保留: {exc}")
+        if require_live:
+            return {"ok": False, "cpa_result": None, "live": None, "error": str(exc)}
+        return {"ok": True, "warning": True, "cpa_result": None, "live": None, "error": str(exc)}
 
 
 def export_cpa_xai_for_account(email, password, sso=None, log_callback=None, page=None):
@@ -4978,14 +5047,12 @@ class GrokRegisterGUI:
             )
             log_fn(f"[*] 邮箱: {email}")
             try:
+                from account_outputs import save_mail_credential
                 with _io_lock:
-                    with open(
-                        os.path.join(os.path.dirname(__file__), "mail_credentials.txt"),
-                        "a", encoding="utf-8",
-                    ) as f:
-                        f.write(f"{email}\t{dev_token}\n")
-            except Exception:
-                pass
+                    save_mail_credential(os.path.dirname(__file__), email, dev_token)
+            except Exception as mail_save_exc:
+                if log_fn:
+                    log_fn(f"[Debug] 写入 mail_credentials 失败: {mail_save_exc}")
             log_fn("[*] 3. 拉取验证码")
             try:
                 code = fill_code_and_submit(
@@ -5022,16 +5089,8 @@ class GrokRegisterGUI:
                 log_fn(f"[+] NSFW 开启成功: {nsfw_msg}")
             else:
                 log_fn(f"[!] NSFW 开启失败（可继续）: {nsfw_msg}")
-        gate = run_success_live_gate(
-            email,
-            profile.get("password", ""),
-            sso,
-            log_callback=log_fn,
-            page=None if bool(config.get("cpa_mint_async", True)) else _cpa_page,
-        )
-        if not gate.get("ok"):
-            raise Exception(gate.get("error") or "live inspect gate failed")
-        persist_successful_account(
+        # Aaron-style: persist account first; CPA/token conversion is post-process.
+        persist_out = persist_successful_account(
             email,
             profile.get("password", ""),
             sso,
@@ -5039,8 +5098,24 @@ class GrokRegisterGUI:
             log_callback=log_fn,
             profile=profile,
         )
+        gate = run_success_live_gate(
+            email,
+            profile.get("password", ""),
+            sso,
+            log_callback=log_fn,
+            page=None if bool(config.get("cpa_mint_async", True)) else _cpa_page,
+        )
+        if not gate.get("ok") and bool(config.get("success_require_live", False)):
+            raise Exception(gate.get("error") or "live inspect gate failed")
         with _stats_lock:
-            self.results.append({"email": email, "sso": sso, "profile": profile, "live": gate.get("live")})
+            self.results.append({
+                "email": email,
+                "sso": sso,
+                "profile": profile,
+                "live": gate.get("live"),
+                "saved": (persist_out or {}).get("saved"),
+                "cpa": gate.get("cpa_result"),
+            })
             self.success_count += 1
         log_fn(f"[+] 注册成功: {email}")
 
@@ -5179,14 +5254,12 @@ def _register_one_account_cli(log_fn, stop_fn, accounts_output_file):
         )
         log_fn(f"[*] 邮箱: {email}")
         try:
+            from account_outputs import save_mail_credential
             with _io_lock:
-                with open(
-                    os.path.join(os.path.dirname(__file__), "mail_credentials.txt"),
-                    "a", encoding="utf-8",
-                ) as f:
-                    f.write(f"{email}\t{dev_token}\n")
-        except Exception:
-            pass
+                save_mail_credential(os.path.dirname(__file__), email, dev_token)
+        except Exception as mail_save_exc:
+            if log_fn:
+                log_fn(f"[Debug] 写入 mail_credentials 失败: {mail_save_exc}")
         log_fn("[*] 3. 拉取验证码")
         try:
             code = fill_code_and_submit(
@@ -5223,15 +5296,7 @@ def _register_one_account_cli(log_fn, stop_fn, accounts_output_file):
             log_fn(f"[+] NSFW 开启成功: {nsfw_msg}")
         else:
             log_fn(f"[!] NSFW 开启失败（可继续）: {nsfw_msg}")
-    gate = run_success_live_gate(
-        email,
-        profile.get("password", ""),
-        sso,
-        log_callback=log_fn,
-        page=None if bool(config.get("cpa_mint_async", True)) else _cpa_page,
-    )
-    if not gate.get("ok"):
-        raise Exception(gate.get("error") or "live inspect gate failed")
+    # Aaron-style: persist account first; CPA/token conversion is post-process.
     persist_successful_account(
         email,
         profile.get("password", ""),
@@ -5240,6 +5305,15 @@ def _register_one_account_cli(log_fn, stop_fn, accounts_output_file):
         log_callback=log_fn,
         profile=profile,
     )
+    gate = run_success_live_gate(
+        email,
+        profile.get("password", ""),
+        sso,
+        log_callback=log_fn,
+        page=None if bool(config.get("cpa_mint_async", True)) else _cpa_page,
+    )
+    if not gate.get("ok") and bool(config.get("success_require_live", False)):
+        raise Exception(gate.get("error") or "live inspect gate failed")
     log_fn(f"[+] 注册成功: {email}")
 
 

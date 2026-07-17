@@ -69,23 +69,23 @@ def mint_and_export(
     headless: bool = False,
     base_url: str = DEFAULT_BASE_URL,
     headers: dict[str, str] | None = None,
-    probe: bool = True,
+    probe: bool = False,
     probe_chat: bool = False,
     probe_strict: bool = False,
-    live_inspect: bool = True,
+    live_inspect: bool = False,
     browser_timeout_sec: float = 240.0,
-    force_standalone: bool = False,
+    force_standalone: bool = True,
     cookies: Any | None = None,
     sso: str | None = None,
-    prefer_auth_code: bool = True,
-    require_cli_referrer: bool = True,
+    prefer_auth_code: bool = False,
+    require_cli_referrer: bool = False,
     allow_device_fallback: bool = True,
     reuse_browser: bool = True,
     recycle_every: int = 15,
     log: LogFn | None = None,
     cancel: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
-    """Full pipeline: SSO auth-code (preferred) or device-auth -> write CPA file -> probe.
+    """Full pipeline: device-code browser mint (default) or optional auth-code.
 
     Authorization-code + PKCE injects JWT referrer=grok-build required by
     cli-chat-proxy. Device-code tokens usually lack referrer and get 403.
@@ -105,7 +105,7 @@ def mint_and_export(
 
     if prefer_auth_code and sso_val:
         try:
-            log("mint via auth-code + PKCE (referrer=grok-build)")
+            log("mint via auth-code + PKCE (opt-in)")
             tokens = mint_tokens_from_sso(
                 sso_val,
                 proxy=resolved or None,
@@ -129,10 +129,12 @@ def mint_and_export(
         try:
             if flow_err:
                 log("falling back to browser device-code flow")
+            else:
+                log("mint via browser device-code flow")
             tokens = mint_with_browser(
                 email=email,
                 password=password,
-                page=page,
+                page=None if force_standalone else page,
                 proxy=resolved or None,
                 headless=headless,
                 browser_timeout_sec=browser_timeout_sec,
