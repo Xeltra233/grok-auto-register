@@ -344,6 +344,93 @@ def save_config():
         print(f"保存配置失败: {e}")
 
 
+
+def prepare_goproxy_for_registration(log_callback=None):
+    """Ensure local GoProxy is available and optionally bind register/CPA proxy URLs.
+
+    Called right before registration starts (GUI/CLI):
+    - start embedded GoProxy when enabled and auto-start/bind is on
+    - rewrite config.proxy / config.cpa_proxy from selected local endpoint when bind flags are set
+    """
+    global config
+    log = log_callback or (lambda _m: None)
+    cfg = normalize_branch_config(dict(config))
+    if not bool(cfg.get("goproxy_enabled", True)):
+        return {
+            "ok": True,
+            "skipped": True,
+            "reason": "goproxy_disabled",
+            "proxy": str(config.get("proxy") or ""),
+            "cpa_proxy": str(config.get("cpa_proxy") or ""),
+        }
+
+    root = os.path.dirname(os.path.abspath(__file__))
+    try:
+        from panel.goproxy_manager import get_manager
+        from panel.settings import describe_proxy_selection, resolve_local_proxy_url
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": f"goproxy manager unavailable: {exc}",
+            "proxy": str(config.get("proxy") or ""),
+            "cpa_proxy": str(config.get("cpa_proxy") or ""),
+        }
+
+    mgr = get_manager(cfg, root=root)
+    mgr.set_config(cfg)
+    selection = describe_proxy_selection(cfg)
+    local_url = resolve_local_proxy_url(cfg)
+    bind_register = bool(cfg.get("goproxy_bind_register_proxy", False))
+    bind_cpa = bool(cfg.get("goproxy_bind_cpa_proxy", False))
+    auto_start = bool(cfg.get("goproxy_auto_start", True))
+    want_start = auto_start or bind_register or bind_cpa
+
+    start_res = None
+    if want_start:
+        try:
+            start_res = mgr.start(build_if_missing=True, wait_sec=3)
+        except Exception as exc:
+            start_res = {"ok": False, "error": str(exc)}
+        if start_res and start_res.get("ok"):
+            already = start_res.get("already_running") or start_res.get("external")
+            tag = "already running" if already else "started"
+            log(
+                f"[goproxy] {tag}: endpoint={selection.get('endpoint')} "
+                f"url={local_url} mode={selection.get('pool_mode')}"
+            )
+        else:
+            err = (start_res or {}).get("error") or "start failed"
+            log(f"[goproxy] start failed (register continues with current proxy): {err}")
+
+    # Re-apply bindings from current manager selection so runtime proxy matches panel choice.
+    bound = mgr.apply_bindings_to(cfg)
+    if bind_register:
+        config["proxy"] = str(bound.get("proxy") or local_url)
+        log(f"[goproxy] register proxy bound -> {config['proxy']}")
+    if bind_cpa:
+        config["cpa_proxy"] = str(bound.get("cpa_proxy") or local_url)
+        log(f"[goproxy] cpa proxy bound -> {config['cpa_proxy']}")
+
+    # Keep manager config in sync with runtime decisions.
+    try:
+        mgr.set_config(config)
+    except Exception:
+        pass
+
+    return {
+        "ok": True if (start_res is None or start_res.get("ok") or not want_start) else False,
+        "started": bool(start_res and start_res.get("ok")),
+        "start": start_res,
+        "bind_register": bind_register,
+        "bind_cpa": bind_cpa,
+        "proxy": str(config.get("proxy") or ""),
+        "cpa_proxy": str(config.get("cpa_proxy") or ""),
+        "selection": selection,
+        "local_url": local_url,
+    }
+
+
+
 def ensure_stable_python_runtime():
     if sys.version_info < (3, 14) or os.environ.get("DPE_REEXEC_DONE") == "1":
         return
@@ -4610,6 +4697,16 @@ class GrokRegisterGUI:
         config["register_count"] = count
         config["concurrent_count"] = concurrent
         save_config()
+        # Bind/start local GoProxy so registration uses selected local ports when enabled.
+        try:
+            prep = prepare_goproxy_for_registration(log_callback=self.log)
+            if prep.get("bind_register") and prep.get("proxy") is not None:
+                try:
+                    self.proxy_var.set(str(prep.get("proxy") or ""))
+                except Exception:
+                    pass
+        except Exception as exc:
+            self.log(f"[goproxy] prepare failed: {exc}")
         self.stop_requested = False
         self.success_count = 0
         self.fail_count = 0
@@ -5106,6 +5203,11 @@ def _cli_worker_loop(worker_id, task_queue, total_count, controller, accounts_ou
 
 
 def run_registration_cli(count):
+    # Ensure local GoProxy is up and proxy strings bound before CLI workers start.
+    try:
+        prepare_goproxy_for_registration(log_callback=cli_log)
+    except Exception as exc:
+        cli_log(f"[goproxy] prepare failed: {exc}")
     controller = CliStopController()
     prev_handler = _install_cli_sigint_handler(controller)
     accounts_output_file = os.path.join(
