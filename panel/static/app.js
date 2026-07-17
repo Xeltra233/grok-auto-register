@@ -459,8 +459,9 @@ function applyOverview(data, opts = {}) {
     二进制: data.goproxy?.binary,
     最近错误: data.goproxy?.last_error,
     端口状态: data.goproxy?.port_status,
-    管理页: `http://127.0.0.1:${data.goproxy?.ports?.webui || data.proxy?.ports?.webui || 17878}/`,
-    默认密码: "goproxy",
+    管理页路径: data.goproxy?.webui_path || "/goproxy/",
+    管理页说明: "同域路径反代，无需额外开放端口",
+    默认密码: data.config?.goproxy_webui_password || "goproxy",
   }, null, 2);
   // Config forms are intentionally NOT refreshed by overview/SSE.
   $("registerStatus").textContent = JSON.stringify({
@@ -647,9 +648,9 @@ async function main() {
   $("btnProxyStop").onclick = async () => withBusy($("btnProxyStop"), async () => { try { await api("/api/goproxy/stop", { method: "POST", body: "{}" }); await afterMutation("本地代理停止请求已发送"); } catch (e) { toast(e.message, false); } }, "停止中...");
   $("btnProxyRestart").onclick = async () => withBusy($("btnProxyRestart"), async () => { try { await api("/api/goproxy/restart", { method: "POST", body: "{}" }); await afterMutation("本地代理重启请求已发送"); } catch (e) { toast(e.message, false); } }, "重启中...");
   $("btnOpenWebui").onclick = () => {
-    const ports = state.overview?.goproxy?.ports || state.overview?.proxy?.ports || {};
-    const port = ports.webui || 17878;
-    window.open(`http://127.0.0.1:${port}/`, "_blank", "noopener,noreferrer");
+    // Same-origin reverse proxy path; no public WebUI port needed.
+    const path = state.overview?.goproxy?.webui_path || "/goproxy/";
+    window.open(path, "_blank", "noopener,noreferrer");
   };
   $("btnApplyProxy").onclick = async () => {
     try {

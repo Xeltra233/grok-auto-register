@@ -17,7 +17,9 @@ from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, urljoin
+from urllib.request import Request, urlopen
+import urllib.error
 
 from panel.credentials import (
     build_credentials_zip,
@@ -143,6 +145,130 @@ class PanelState:
 
 
 STATE = PanelState()
+
+GOPROXY_UI_PREFIX = "/goproxy"
+
+
+def _goproxy_webui_base() -> str:
+    cfg = STATE.config or {}
+    host = str(cfg.get("goproxy_host") or "127.0.0.1").strip() or "127.0.0.1"
+    try:
+        port = int(cfg.get("goproxy_webui_port") or 17878)
+    except Exception:
+        port = 17878
+    return f"http://{host}:{port}"
+
+
+def _rewrite_goproxy_location(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return raw
+    if raw.startswith(GOPROXY_UI_PREFIX):
+        return raw
+    if raw.startswith("/"):
+        return GOPROXY_UI_PREFIX + raw
+    # absolute url pointing to local webui
+    try:
+        u = urlparse(raw)
+        base = urlparse(_goproxy_webui_base())
+        if u.netloc and (u.hostname in (base.hostname, "127.0.0.1", "localhost")):
+            path = u.path or "/"
+            if not path.startswith(GOPROXY_UI_PREFIX):
+                path = GOPROXY_UI_PREFIX + path
+            q = f"?{u.query}" if u.query else ""
+            f = f"#{u.fragment}" if u.fragment else ""
+            return path + q + f
+    except Exception:
+        pass
+    return raw
+
+
+def _rewrite_set_cookie(value: str) -> str:
+    """Keep GoProxy session cookie scoped under /goproxy to avoid root hijack."""
+    parts = [p.strip() for p in str(value or "").split(";") if p.strip()]
+    if not parts:
+        return value
+    out = [parts[0]]
+    saw_path = False
+    for part in parts[1:]:
+        low = part.lower()
+        if low.startswith("path="):
+            saw_path = True
+            out.append("Path=" + GOPROXY_UI_PREFIX + "/")
+        else:
+            out.append(part)
+    if not saw_path:
+        out.append("Path=" + GOPROXY_UI_PREFIX + "/")
+    return "; ".join(out)
+
+
+def _rewrite_goproxy_html(body: bytes) -> bytes:
+    """Rewrite absolute paths in GoProxy WebUI HTML/JS so it works under /goproxy."""
+    try:
+        text = body.decode("utf-8")
+    except Exception:
+        try:
+            text = body.decode("latin-1")
+        except Exception:
+            return body
+
+    prefix = GOPROXY_UI_PREFIX
+
+    # form/actions/links/redirects
+    repls = [
+        (r'action="/login"', f'action="{prefix}/login"'),
+        (r"action='/login'", f"action='{prefix}/login'"),
+        (r'href="/login"', f'href="{prefix}/login"'),
+        (r"href='/login'", f"href='{prefix}/login'"),
+        (r'href="/logout"', f'href="{prefix}/logout"'),
+        (r"href='/logout'", f"href='{prefix}/logout'"),
+        (r'href="/"', f'href="{prefix}/"'),
+        (r"href='/'", f"href='{prefix}/'"),
+        (r"location\.href\s*=\s*'/login'", f"location.href = '{prefix}/login'"),
+        (r'location\.href\s*=\s*"/login"', f'location.href = "{prefix}/login"'),
+        (r"location\.href\s*=\s*'/'", f"location.href = '{prefix}/'"),
+        (r'location\.href\s*=\s*"/"', f'location.href = "{prefix}/"'),
+        # fetch/api absolute paths used by dashboard
+        (r"fetch\('/api/", f"fetch('{prefix}/api/"),
+        (r'fetch\("/api/', f'fetch("{prefix}/api/'),
+        (r"api\('/api/", f"api('{prefix}/api/"),
+        (r'api\("/api/', f'api("{prefix}/api/'),
+        (r"await api\('/api/", f"await api('{prefix}/api/"),
+        (r'await api\("/api/', f'await api("{prefix}/api/'),
+        (r"'/api/", f"'{prefix}/api/"),
+        (r'"/api/', f'"{prefix}/api/'),
+    ]
+    for a, b in repls:
+        text = re.sub(a, b, text)
+
+    # inject base-path fetch wrapper as early as possible
+    inject = (
+        "<script>(function(){var P='" + prefix + "';"
+        "if(window.__goproxyPrefixPatched)return;window.__goproxyPrefixPatched=1;"
+        "var of=window.fetch;window.fetch=function(i,n){"
+        "try{if(typeof i==='string'&&i.charAt(0)==='/'&&i.indexOf(P+'/')!==0&&i!==P){i=P+i;}"
+        "else if(i&&typeof Request!=='undefined'&&i instanceof Request){"
+        "var u=i.url;try{u=new URL(u,location.origin).pathname+new URL(u,location.origin).search+new URL(u,location.origin).hash;}catch(e){}"
+        "if(typeof u==='string'&&u.charAt(0)==='/'&&u.indexOf(P+'/')!==0&&u!==P){"
+        "i=new Request(P+u,i);}}}catch(e){}"
+        "return of.call(this,i,n);};"
+        "var oa=window.XMLHttpRequest&&XMLHttpRequest.prototype.open;"
+        "if(oa){XMLHttpRequest.prototype.open=function(m,u){"
+        "try{if(typeof u==='string'&&u.charAt(0)==='/'&&u.indexOf(P+'/')!==0&&u!==P){u=P+u;}}catch(e){}"
+        "return oa.apply(this,[m,u].concat([].slice.call(arguments,2)));};}"
+        "})();</script>"
+    )
+    low = text.lower()
+    idx = low.find("<head>")
+    if idx >= 0:
+        ins = idx + len("<head>")
+        text = text[:ins] + inject + text[ins:]
+    else:
+        text = inject + text
+
+    return text.encode("utf-8")
+
+
 
 
 def _json_response(handler: BaseHTTPRequestHandler, code: int, payload: Any):
@@ -313,6 +439,14 @@ class PanelHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
+        # GoProxy WebUI reverse proxy under same origin path (no extra public port).
+        if path == GOPROXY_UI_PREFIX or path.startswith(GOPROXY_UI_PREFIX + "/"):
+            if _auth_required() and not _check_token(self):
+                self.send_response(302)
+                self.send_header("Location", "/login")
+                self.end_headers()
+                return
+            return self._proxy_goproxy(parsed)
         # static assets always public (login page needs css/js)
         if path.startswith("/static/"):
             return self._serve_static(path[len("/static/") :])
@@ -361,6 +495,10 @@ class PanelHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = urlparse(self.path)
         path = parsed.path
+        if path == GOPROXY_UI_PREFIX or path.startswith(GOPROXY_UI_PREFIX + "/"):
+            if _auth_required() and not _check_token(self):
+                return self._unauthorized()
+            return self._proxy_goproxy(parsed)
         if not path.startswith("/api/"):
             _json_response(self, 404, {"ok": False, "error": "not found"})
             return
@@ -381,9 +519,28 @@ class PanelHandler(BaseHTTPRequestHandler):
                 {"ok": False, "error": str(exc), "trace": traceback.format_exc()[-1000:]},
             )
 
+    def do_PUT(self):
+        return self.do_POST()
+
+    def do_DELETE(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+        if path == GOPROXY_UI_PREFIX or path.startswith(GOPROXY_UI_PREFIX + "/"):
+            if _auth_required() and not _check_token(self):
+                return self._unauthorized()
+            return self._proxy_goproxy(parsed)
+        return _json_response(self, 404, {"ok": False, "error": "not found"})
+
+    def do_PATCH(self):
+        return self.do_POST()
+
     def _overview_payload(self) -> dict:
         cfg = STATE.reload()
         g = STATE.manager.status()
+        if isinstance(g, dict):
+            g = dict(g)
+            g["webui_path"] = GOPROXY_UI_PREFIX + "/"
+            g["webui_proxy"] = True
         pool = pool_counts(cfg, root=str(STATE.root))
         try:
             pool_need = compute_register_need(
@@ -513,6 +670,97 @@ class PanelHandler(BaseHTTPRequestHandler):
             return
         except Exception:
             return
+
+
+    def _proxy_goproxy(self, parsed):
+        """Reverse-proxy GoProxy WebUI under /goproxy without exposing extra ports."""
+        prefix = GOPROXY_UI_PREFIX
+        raw_path = parsed.path or "/"
+        if raw_path == prefix:
+            # normalize /goproxy -> /goproxy/
+            self.send_response(302)
+            self.send_header("Location", prefix + "/")
+            self.end_headers()
+            return
+
+        rel = raw_path[len(prefix):] or "/"
+        if not rel.startswith("/"):
+            rel = "/" + rel
+        query = parsed.query
+        target = _goproxy_webui_base().rstrip("/") + rel
+        if query:
+            target = target + "?" + query
+
+        # read body if present
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except Exception:
+            length = 0
+        body = self.rfile.read(length) if length > 0 else None
+
+        # forward selected headers
+        hop_by_hop = {
+            "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+            "te", "trailers", "transfer-encoding", "upgrade", "host", "content-length",
+        }
+        headers = {}
+        for k, v in self.headers.items():
+            if k.lower() in hop_by_hop:
+                continue
+            # avoid leaking panel auth cookie name conflicts; still forward Cookie for goproxy session
+            headers[k] = v
+        headers["Host"] = urlparse(_goproxy_webui_base()).netloc
+        headers["X-Forwarded-Prefix"] = prefix
+        headers["X-Forwarded-Proto"] = "https" if (self.headers.get("X-Forwarded-Proto") or "").lower() == "https" else "http"
+        headers["X-Forwarded-Host"] = self.headers.get("Host") or ""
+
+        req = Request(target, data=body, headers=headers, method=self.command)
+        try:
+            with urlopen(req, timeout=30) as resp:
+                resp_body = resp.read()
+                status = getattr(resp, "status", 200) or 200
+                resp_headers = dict(resp.headers.items())
+        except urllib.error.HTTPError as exc:
+            resp_body = exc.read() if hasattr(exc, "read") else b""
+            status = int(getattr(exc, "code", 502) or 502)
+            resp_headers = dict(exc.headers.items()) if getattr(exc, "headers", None) is not None else {}
+        except Exception as exc:
+            return _json_response(
+                self,
+                502,
+                {
+                    "ok": False,
+                    "error": f"goproxy webui proxy failed: {exc}",
+                    "target": target,
+                    "hint": "请先在面板启动本地 GoProxy；管理页通过 /goproxy/ 同域访问，无需额外开放端口",
+                },
+            )
+
+        ctype = str(resp_headers.get("Content-Type") or resp_headers.get("content-type") or "")
+        if "text/html" in ctype.lower():
+            resp_body = _rewrite_goproxy_html(resp_body)
+
+        self.send_response(status)
+        skip = {"content-length", "transfer-encoding", "connection", "content-encoding"}
+        for k, v in resp_headers.items():
+            lk = k.lower()
+            if lk in skip:
+                continue
+            if lk == "location":
+                self.send_header("Location", _rewrite_goproxy_location(v))
+                continue
+            if lk == "set-cookie":
+                # may be multi; BaseHTTP one header at a time
+                self.send_header("Set-Cookie", _rewrite_set_cookie(v))
+                continue
+            self.send_header(k, v)
+        self.send_header("Content-Length", str(len(resp_body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        try:
+            self.wfile.write(resp_body)
+        except Exception:
+            pass
 
     def _serve_static(self, rel: str):
 
