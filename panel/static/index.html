@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Grok Panel · Glass</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="bg-orb orb-a"></div>
+  <div class="bg-orb orb-b"></div>
+  <div class="bg-orb orb-c"></div>
+
+  <header class="topbar glass">
+    <div class="brand">
+      <div class="logo">G</div>
+      <div>
+        <div class="title">Grok Auto Panel</div>
+        <div class="subtitle">本地合并 GoProxy · 浏览器监控 · 凭证库 · 实时同步</div>
+      </div>
+    </div>
+    <div class="top-actions">
+      <div id="liveBadge" class="live-badge off">LIVE · 连接中</div>
+      <div id="lastSync" class="last-sync">上次同步: -</div>
+      <button id="btnRefresh" class="btn">立即刷新</button>
+      <button id="btnCleanupBrowsers" class="btn danger">清理僵尸浏览器</button>
+      <button id="btnLogCleanup" class="btn">清理日志</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="card glass">
+      <h2>总览</h2>
+      <div class="metrics" id="metrics">
+        <div class="metric"><span>注册浏览器</span><b id="mReg">-</b></div>
+        <div class="metric"><span>僵尸进程</span><b id="mZombie">-</b></div>
+        <div class="metric"><span>GoProxy</span><b id="mProxy">-</b></div>
+        <div class="metric"><span>已推送凭证</span><b id="mUploaded">-</b></div>
+      </div>
+      <div class="hint-row">
+        <span class="pill" id="pillLive">测活门槛: -</span>
+        <span class="pill" id="pillBind">代理绑定: -</span>
+      </div>
+      <pre id="overviewExtra" class="mono muted"></pre>
+    </section>
+
+    <section class="card glass">
+      <h2>本地代理（GoProxy）</h2>
+      <div class="row">
+        <label>池模式
+          <select id="poolMode"></select>
+        </label>
+        <label>接入端口
+          <select id="endpoint"></select>
+        </label>
+        <label class="check"><input type="checkbox" id="bindProxy" /> 绑定到 register/cpa proxy</label>
+      </div>
+      <div class="row">
+        <button id="btnProxyStart" class="btn primary">启动</button>
+        <button id="btnProxyStop" class="btn">停止</button>
+        <button id="btnProxyRestart" class="btn">重启</button>
+        <button id="btnApplyProxy" class="btn primary">应用模式/端口</button>
+      </div>
+      <div class="chips" id="portChips"></div>
+      <pre id="proxyStatus" class="mono"></pre>
+    </section>
+
+    <section class="card glass wide">
+      <div class="row between wrap-head">
+        <div>
+          <h2>CPA 凭证库</h2>
+          <p class="section-sub">支持多选 / 全选下载；删除默认仅限已推送 uploaded</p>
+        </div>
+        <div class="row actions-tight">
+          <button id="btnSelectAll" class="btn">全选已推送</button>
+          <button id="btnDownload" class="btn primary">下载选中</button>
+          <button id="btnDownloadAllUploaded" class="btn">下载全部已推送</button>
+          <button id="btnDeleteSelected" class="btn danger">删除选中已推送</button>
+          <button id="btnDeleteAllUploaded" class="btn danger">一键删除已推送</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th><input type="checkbox" id="checkAllVisible" /></th>
+              <th>名称</th>
+              <th>桶</th>
+              <th>大小</th>
+              <th>时间</th>
+            </tr>
+          </thead>
+          <tbody id="credBody"></tbody>
+        </table>
+        <div id="credEmpty" class="empty-state hidden">暂无凭证。注册并测活通过后会出现在 pending / uploaded。</div>
+      </div>
+      <p class="muted">默认删除/全量下载仅针对 <code>uploaded</code>，不会动 pending。列表随后端 SSE/轮询实时刷新。</p>
+    </section>
+
+    <section class="card glass wide">
+      <div class="row between">
+        <h2>浏览器实例</h2>
+        <div class="muted" id="browserSummaryText">registered 0 · zombies 0</div>
+      </div>
+      <div class="table-wrap browser-table">
+        <table>
+          <thead>
+            <tr>
+              <th>用途</th>
+              <th>PID</th>
+              <th>Worker</th>
+              <th>存活</th>
+              <th>时长</th>
+              <th>Profile</th>
+            </tr>
+          </thead>
+          <tbody id="browserBody"></tbody>
+        </table>
+        <div id="browserEmpty" class="empty-state hidden">当前没有已注册浏览器实例。</div>
+      </div>
+      <details class="raw-details">
+        <summary>原始监控 JSON</summary>
+        <pre id="browserDetails" class="mono"></pre>
+      </details>
+    </section>
+  </main>
+
+  <div id="toast" class="toast glass hidden"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
