@@ -44,7 +44,41 @@ except Exception:  # pragma: no cover - fallback if panel package missing
         return cfg
 
 
-CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+def _project_root_dir():
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def resolve_config_file(root=None, prefer_existing=True):
+    """Resolve runtime config path.
+
+    Priority:
+    - GROK_CONFIG_FILE
+    - GROK_CONFIG_DIR/config.json
+    - existing config/config.json
+    - existing root config.json (legacy)
+    - default config/config.json
+    """
+    root = root or _project_root_dir()
+    env_file = (os.environ.get("GROK_CONFIG_FILE") or "").strip()
+    if env_file:
+        return env_file if os.path.isabs(env_file) else os.path.abspath(os.path.join(root, env_file))
+
+    env_dir = (os.environ.get("GROK_CONFIG_DIR") or "").strip()
+    if env_dir:
+        base = env_dir if os.path.isabs(env_dir) else os.path.abspath(os.path.join(root, env_dir))
+        return os.path.join(base, "config.json")
+
+    folder_cfg = os.path.join(root, "config", "config.json")
+    legacy_cfg = os.path.join(root, "config.json")
+    if prefer_existing:
+        if os.path.isfile(folder_cfg):
+            return folder_cfg
+        if os.path.isfile(legacy_cfg):
+            return legacy_cfg
+    return folder_cfg
+
+
+CONFIG_FILE = resolve_config_file()
 MEMORY_CLEANUP_INTERVAL = 5
 
 UI_BG = "#242424"
@@ -321,7 +355,8 @@ def start_speed_logger(get_counts, log_callback, stop_event, interval_sec=60):
 
 
 def load_config():
-    global config
+    global config, CONFIG_FILE
+    CONFIG_FILE = resolve_config_file()
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
@@ -339,12 +374,17 @@ def load_config():
 
 
 def save_config():
+    global CONFIG_FILE
     try:
+        if not CONFIG_FILE:
+            CONFIG_FILE = resolve_config_file()
+        parent = os.path.dirname(CONFIG_FILE)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=4, ensure_ascii=False)
     except Exception as e:
         print(f"保存配置失败: {e}")
-
 
 
 def prepare_goproxy_for_registration(log_callback=None):

@@ -1,6 +1,31 @@
 # grok-auto-register cloud image (feature/web-panel-goproxy)
-# Starts web panel via main.py
+# Multi-stage: prebuild GoProxy binary, then run web panel via main.py
 
+# ---------- stage 1: build GoProxy (linux) ----------
+FROM golang:1.25-bookworm AS goproxy-builder
+
+WORKDIR /src
+COPY third_party/goproxy/go.mod third_party/goproxy/go.sum ./
+RUN go mod download
+
+COPY third_party/goproxy/ ./
+# Vendored GoProxy uses modernc.org/sqlite; pure-Go build needs no gcc.
+ENV CGO_ENABLED=0
+RUN mkdir -p /out/bin \
+    && go build -trimpath -ldflags="-s -w" -o /out/bin/proxygo . \
+    && chmod +x /out/bin/proxygo
+
+# Optional sing-box for custom encrypted nodes (not required for basic pool mode).
+ARG SINGBOX_VERSION=1.13.5
+RUN ARCH=$(case "$(dpkg --print-architecture)" in amd64) echo "amd64";; arm64) echo "arm64";; *) echo "amd64";; esac) \
+    && curl -fsSL "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-${ARCH}.tar.gz" \
+       -o /tmp/sing-box.tar.gz \
+    && tar -xzf /tmp/sing-box.tar.gz -C /tmp \
+    && cp "/tmp/sing-box-${SINGBOX_VERSION}-linux-${ARCH}/sing-box" /out/bin/sing-box \
+    && chmod +x /out/bin/sing-box \
+    && rm -rf /tmp/sing-box*
+
+# ---------- stage 2: runtime ----------
 FROM python:3.11-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -12,7 +37,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PANEL_PORT=8787 \
     PORT=8787 \
     GOPROXY_ENABLED=0 \
-    DEBIAN_FRONTEND=noninteractive
+    DEBIAN_FRONTEND=noninteractive \
+    PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
@@ -42,9 +68,19 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-RUN mkdir -p /app/logs /app/cpa_auths /app/data /app/.browser_profiles \
-    && if [ ! -f /app/config.json ] && [ -f /app/config.example.json ]; then \
-         cp /app/config.example.json /app/config.json; \
+# Prebuilt GoProxy + sing-box into image (no Go toolchain needed at runtime).
+RUN mkdir -p /app/third_party/goproxy/bin /app/config /app/logs /app/cpa_auths /app/data /app/.browser_profiles
+COPY --from=goproxy-builder /out/bin/proxygo /app/third_party/goproxy/bin/proxygo
+COPY --from=goproxy-builder /out/bin/sing-box /usr/local/bin/sing-box
+RUN chmod +x /app/third_party/goproxy/bin/proxygo /usr/local/bin/sing-box \
+    && if [ ! -f /app/config/config.json ]; then \
+         if [ -f /app/config/config.example.json ]; then \
+           cp /app/config/config.example.json /app/config/config.json; \
+         elif [ -f /app/config.example.json ]; then \
+           cp /app/config.example.json /app/config/config.json; \
+         else \
+           echo '{}' > /app/config/config.json; \
+         fi; \
        fi
 
 EXPOSE 8787

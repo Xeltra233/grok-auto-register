@@ -64,9 +64,36 @@ def _project_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+def _config_path(root: Path | None = None) -> Path:
+    """Prefer config/config.json; keep legacy root config.json fallback."""
+    root = root or _project_root()
+    try:
+        import grok_register_ttk as app
+
+        return Path(app.resolve_config_file(root=str(root)))
+    except Exception:
+        pass
+    env_file = (os.environ.get("GROK_CONFIG_FILE") or "").strip()
+    if env_file:
+        p = Path(env_file)
+        return p if p.is_absolute() else (root / p)
+    env_dir = (os.environ.get("GROK_CONFIG_DIR") or "").strip()
+    if env_dir:
+        d = Path(env_dir)
+        base = d if d.is_absolute() else (root / d)
+        return base / "config.json"
+    folder = root / "config" / "config.json"
+    legacy = root / "config.json"
+    if folder.is_file():
+        return folder
+    if legacy.is_file():
+        return legacy
+    return folder
+
+
 def _load_config() -> dict:
     root = _project_root()
-    cfg_path = root / "config.json"
+    cfg_path = _config_path(root)
     data = {}
     if cfg_path.is_file():
         try:
@@ -85,12 +112,14 @@ def _load_config() -> dict:
 
 def _save_config(cfg: dict) -> None:
     root = _project_root()
-    path = root / "config.json"
+    path = _config_path(root)
     # keep as plain json; do not drop unknown keys
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(cfg, ensure_ascii=False, indent=4) + "\n", encoding="utf-8")
     try:
         import grok_register_ttk as app
 
+        app.CONFIG_FILE = str(path)
         app.config.clear()
         app.config.update(cfg)
     except Exception:

@@ -26,6 +26,9 @@ mail_credentials.txt
 tokens.txt
 config.json
 config.local.json
+config/config.json
+config/config.local.json
+!config/config.example.json
 node_modules
 .DS_Store
 .idea

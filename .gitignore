@@ -1,4 +1,4 @@
-﻿__pycache__/
+__pycache__/
 *.pyc
 *.pyo
 *.pyd
@@ -17,6 +17,9 @@ screenshots/
 
 config.json
 config.local.json
+config/config.json
+config/config.local.json
+!config/config.example.json
 
 *.log
 .DS_Store

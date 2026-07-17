@@ -45,10 +45,10 @@ class BranchConfigTests(unittest.TestCase):
         self.assertEqual(cfg["register_count"], 3)
         self.assertEqual(cfg["proxy"], "http://127.0.0.1:7890")
         self.assertTrue(cfg["panel_enabled"])
-        self.assertEqual(cfg["goproxy_http_random_port"], 7777)
-        self.assertEqual(cfg["goproxy_http_stable_port"], 7776)
-        self.assertEqual(cfg["goproxy_socks5_random_port"], 7779)
-        self.assertEqual(cfg["goproxy_socks5_stable_port"], 7780)
+        self.assertEqual(cfg["goproxy_http_random_port"], 17877)
+        self.assertEqual(cfg["goproxy_http_stable_port"], 17876)
+        self.assertEqual(cfg["goproxy_socks5_random_port"], 17879)
+        self.assertEqual(cfg["goproxy_socks5_stable_port"], 17880)
         self.assertTrue(cfg["log_cleanup_enabled"])
 
 
@@ -67,22 +67,26 @@ class BranchConfigTests(unittest.TestCase):
             "goproxy_bind_cpa_proxy": True,
         })
         bound = apply_local_proxy_bindings(cfg)
-        self.assertEqual(bound["proxy"], "socks5://127.0.0.1:7780")
-        self.assertEqual(bound["cpa_proxy"], "socks5://127.0.0.1:7780")
+        self.assertEqual(bound["proxy"], "socks5://127.0.0.1:17880")
+        self.assertEqual(bound["cpa_proxy"], "socks5://127.0.0.1:17880")
         env = build_goproxy_env(cfg, base_env={})
         self.assertEqual(env["CUSTOM_PROXY_MODE"], "mixed")
         self.assertEqual(env["CUSTOM_FREE_PRIORITY"], "true")
-        self.assertEqual(env["RANDOM_PORT"], "7777")
-        self.assertEqual(env["STABLE_PORT"], "7776")
-        self.assertEqual(env["SOCKS5_RANDOM_PORT"], "7779")
-        self.assertEqual(env["SOCKS5_STABLE_PORT"], "7780")
+        self.assertEqual(env["RANDOM_PORT"], "17877")
+        self.assertEqual(env["STABLE_PORT"], "17876")
+        self.assertEqual(env["SOCKS5_RANDOM_PORT"], "17879")
+        self.assertEqual(env["SOCKS5_STABLE_PORT"], "17880")
         info = describe_proxy_selection(cfg)
         self.assertEqual(info["endpoint"], "socks5_stable")
         self.assertEqual(info["proxy_url"], resolve_local_proxy_url(cfg))
 
     def test_example_config_has_branch_keys(self):
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        example = os.path.join(root, "config.example.json")
+        candidates = [
+            os.path.join(root, "config", "config.example.json"),
+            os.path.join(root, "config.example.json"),
+        ]
+        example = next((p for p in candidates if os.path.isfile(p)), candidates[-1])
         with open(example, "r", encoding="utf-8") as f:
             data = json.load(f)
         for key in (

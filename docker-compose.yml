@@ -9,9 +9,11 @@ services:
       PANEL_HOST: "0.0.0.0"
       PORT: "8787"
       PANEL_PORT: "8787"
+      # 0=disable embedded GoProxy; 1=start prebuilt binary in image
       GOPROXY_ENABLED: "0"
+      # Optional: GROK_PANEL_PASSWORD: "your-password"
     volumes:
-      - ./config.json:/app/config.json
+      - ./config:/app/config
       - ./cpa_auths:/app/cpa_auths
       - ./logs:/app/logs
       - ./data:/app/data

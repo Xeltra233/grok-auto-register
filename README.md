@@ -40,10 +40,12 @@ git checkout feature/web-panel-goproxy
 
 ```bash
 pip install -r requirements.txt
-cp config.example.json config.json
+mkdir -p config
+cp config/config.example.json config/config.json
+# 兼容旧路径：也可 cp config.example.json config.json
 ```
 
-按需编辑 `config.json`。
+按需编辑 `config/config.json`（也兼容根目录 `config.json`）。
 
 ## 运行
 
@@ -89,12 +91,15 @@ python run_branch.py panel
 
 本分支支持 Docker 运行 Web 面板（容器内不跑 GUI）。
 
+镜像在构建阶段预编译 Linux 版 GoProxy（`third_party/goproxy/bin/proxygo`），运行时不需要安装 Go。
+
 ### 构建与启动
 
 ```bash
-# 准备配置
-cp config.example.json config.json
-# 按需编辑 config.json（邮箱 API、代理、密码等）
+# 准备配置目录（推荐挂载整个文件夹）
+mkdir -p config cpa_auths logs data
+cp config/config.example.json config/config.json
+# 按需编辑 config/config.json（邮箱 API、代理、密码等）
 
 docker compose up -d --build
 ```
@@ -105,7 +110,16 @@ docker compose up -d --build
 
 ```bash
 docker build -t grok-auto-register:panel .
-docker run -d --name grok-auto-register   -p 8787:8787   -e PANEL_HOST=0.0.0.0   -e PORT=8787   -e GOPROXY_ENABLED=0   -v "$PWD/config.json:/app/config.json"   -v "$PWD/cpa_auths:/app/cpa_auths"   -v "$PWD/logs:/app/logs"   -v "$PWD/data:/app/data"   grok-auto-register:panel
+docker run -d --name grok-auto-register \
+  -p 8787:8787 \
+  -e PANEL_HOST=0.0.0.0 \
+  -e PORT=8787 \
+  -e GOPROXY_ENABLED=0 \
+  -v "$PWD/config:/app/config" \
+  -v "$PWD/cpa_auths:/app/cpa_auths" \
+  -v "$PWD/logs:/app/logs" \
+  -v "$PWD/data:/app/data" \
+  grok-auto-register:panel
 ```
 
 ### 容器内注册
@@ -118,9 +132,27 @@ docker exec -it grok-auto-register python run_branch.py cli --start --count 1
 
 - 入口文件：`main.py`（启动 Web 面板）
 - 默认监听：`0.0.0.0:8787`
-- 容器默认关闭内置 GoProxy（`GOPROXY_ENABLED=0`），避免云环境缺 Go 构建链
-- 建议挂载卷：`config.json`、`cpa_auths/`、`logs/`、`data/`
-- 面板密码可用环境变量：`GROK_PANEL_PASSWORD`
+- 配置目录：挂载 `./config` → `/app/config`，主配置为 `config/config.json`
+- 建议挂载卷：`config/`、`cpa_auths/`、`logs/`、`data/`
+- 镜像已预置 Linux GoProxy 二进制：`third_party/goproxy/bin/proxygo`（另含 `sing-box`）
+
+### 环境变量
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `PANEL_HOST` / `HOST` | `0.0.0.0` | 面板监听地址 |
+| `PORT` / `PANEL_PORT` | `8787` | 面板端口 |
+| `GOPROXY_ENABLED` | `0` | `1/true/on` 启动镜像内置 GoProxy；`0` 关闭 |
+| `GROK_PANEL_PASSWORD` | 空 | 面板访问密码；也可用配置项 `panel_token` |
+| `GROK_CONFIG_DIR` | 空 | 配置目录；默认使用 `/app/config` |
+| `GROK_CONFIG_FILE` | 空 | 直接指定配置文件绝对/相对路径 |
+| `CPA_HEADLESS` | 空 | `1/true/on` 强制 CPA 浏览器无头模式 |
+
+说明：
+
+- `GOPROXY_ENABLED=0` 只表示“容器启动时不自动拉起 GoProxy”，不是删掉二进制。
+- 需要代理池时设 `GOPROXY_ENABLED=1` 即可，无需在容器内再装 Go。
+- 配置优先读 `config/config.json`；兼容旧路径根目录 `config.json`。
 
 ## 特性分支能力
 
@@ -205,6 +237,8 @@ python -m unittest tests.test_run_branch tests.test_panel_server tests.test_gopr
 grok-auto-register/
   grok_register_ttk.py      # GUI / CLI 主程序
   run_branch.py             # 特性分支统一入口
+  config/
+    config.example.json
   config.example.json
   panel/                    # Web 面板与相关服务
   cpa_xai/                  # CPA mint / 导出
