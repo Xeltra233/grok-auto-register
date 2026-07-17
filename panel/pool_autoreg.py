@@ -227,6 +227,13 @@ def status() -> dict:
         running = bool(_THREAD and _THREAD.is_alive())
         last = dict(_LAST)
         reg_running = bool(_REG_RUNNING)
+    progress = {}
+    try:
+        import grok_register_ttk as app
+        if hasattr(app, "get_task_progress"):
+            progress = app.get_task_progress() or {}
+    except Exception:
+        progress = {}
     return {
         "running": running,
         "registration_running": reg_running,
@@ -235,6 +242,7 @@ def status() -> dict:
         "last_error": last.get("error"),
         "last_result": last.get("result"),
         "last_trigger": last.get("last_trigger"),
+        "progress": progress,
     }
 
 
@@ -705,15 +713,48 @@ def start_manual_registration(
     def _job():
         try:
             runner(register_count, dict(cfg))
+            progress = {}
+            try:
+                import grok_register_ttk as app
+                if hasattr(app, "get_task_progress"):
+                    progress = app.get_task_progress() or {}
+            except Exception:
+                progress = {}
             with _LOCK:
-                _LAST["last_trigger"] = {**trigger_meta, "ok": True, "finished_ts": time.time()}
+                _LAST["last_trigger"] = {
+                    **trigger_meta,
+                    "ok": True,
+                    "finished_ts": time.time(),
+                    "success": int(progress.get("success") or 0),
+                    "fail": int(progress.get("fail") or 0),
+                    "target": int(progress.get("target") or register_count),
+                }
+                _LAST["result"] = {
+                    "mode": "manual",
+                    "triggered": True,
+                    "register_count": register_count,
+                    "success": int(progress.get("success") or 0),
+                    "fail": int(progress.get("fail") or 0),
+                    "progress": progress,
+                }
+                _LAST["ok"] = True
+                _LAST["error"] = None
         except Exception as exc:
+            progress = {}
+            try:
+                import grok_register_ttk as app
+                if hasattr(app, "get_task_progress"):
+                    progress = app.get_task_progress() or {}
+            except Exception:
+                progress = {}
             with _LOCK:
                 _LAST["last_trigger"] = {
                     **trigger_meta,
                     "ok": False,
                     "error": str(exc),
                     "finished_ts": time.time(),
+                    "success": int(progress.get("success") or 0),
+                    "fail": int(progress.get("fail") or 0),
                 }
                 _LAST["error"] = str(exc)
                 _LAST["ok"] = False
@@ -733,6 +774,15 @@ def start_manual_registration(
         "triggered": True,
         "register_count": register_count,
         "concurrent_count": max(1, min(int(cfg.get("concurrent_count") or 1), register_count)),
+        "progress": {
+            "running": True,
+            "mode": "manual",
+            "target": register_count,
+            "success": 0,
+            "fail": 0,
+            "done": 0,
+            "remaining": register_count,
+        },
     }
     with _LOCK:
         _LAST["ts"] = time.time()

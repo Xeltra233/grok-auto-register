@@ -115,6 +115,15 @@ def _patch_runtime_config(host: str, port: int) -> None:
 
         if "cpa_headless" not in data:
             data["cpa_headless"] = True
+        # Container registration needs packaged Chromium + headless.
+        chromium = ROOT / "unused"
+        for cand in ("/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome"):
+            if Path(cand).is_file():
+                data.setdefault("browser_binary_path", cand)
+                break
+        data.setdefault("browser_headless", True)
+        data.setdefault("register_headless", True)
+        data.setdefault("cpa_headless", True)
         if _truthy(os.environ.get("CPA_HEADLESS")):
             data["cpa_headless"] = True
 

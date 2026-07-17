@@ -37,6 +37,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PANEL_PORT=8787 \
     PORT=8787 \
     GOPROXY_ENABLED=0 \
+    REGISTER_HEADLESS=1 \
+    BROWSER_HEADLESS=1 \
+    CPA_HEADLESS=1 \
     DEBIAN_FRONTEND=noninteractive \
     PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 

@@ -759,6 +759,7 @@ class PanelHandler(BaseHTTPRequestHandler):
             g["webui_path"] = GOPROXY_UI_PREFIX + "/"
             g["webui_proxy"] = True
         pool = pool_counts(cfg, root=str(STATE.root))
+        pool_auto = pool_autoreg_status()
         try:
             pool_need = compute_register_need(
                 current_total=int(pool.get("total") or 0) if pool.get("ok") else 0,
@@ -792,7 +793,8 @@ class PanelHandler(BaseHTTPRequestHandler):
             "log_cleanup_loop": log_cleanup_status(),
             "pool": pool,
             "pool_need": pool_need,
-            "pool_autoreg": pool_autoreg_status(),
+            "pool_autoreg": pool_auto,
+            "task": (pool_auto or {}).get("progress") or {},
             "remote_live": remote_live_status(),
             "local_cred_retain": local_cred_retain_status(),
             "config": {

@@ -81,6 +81,65 @@ def resolve_config_file(root=None, prefer_existing=True):
 CONFIG_FILE = resolve_config_file()
 MEMORY_CLEANUP_INTERVAL = 5
 
+
+def get_task_progress():
+    with _task_progress_lock:
+        data = dict(_TASK_PROGRESS)
+    try:
+        target = int(data.get("target") or 0)
+        success = int(data.get("success") or 0)
+        fail = int(data.get("fail") or 0)
+    except Exception:
+        target, success, fail = 0, 0, 0
+    done = success + fail
+    data["done"] = done
+    data["remaining"] = max(target - done, 0) if target else 0
+    return data
+
+
+def update_task_progress(**kwargs):
+    with _task_progress_lock:
+        for k, v in kwargs.items():
+            if k in _TASK_PROGRESS or k in ("running", "mode", "target", "success", "fail", "done", "concurrent", "started_at", "finished_at", "last_error", "message"):
+                _TASK_PROGRESS[k] = v
+        try:
+            success = int(_TASK_PROGRESS.get("success") or 0)
+            fail = int(_TASK_PROGRESS.get("fail") or 0)
+            target = int(_TASK_PROGRESS.get("target") or 0)
+        except Exception:
+            success = fail = target = 0
+        _TASK_PROGRESS["done"] = success + fail
+        if target:
+            _TASK_PROGRESS["remaining"] = max(target - (success + fail), 0)
+        return dict(_TASK_PROGRESS)
+
+
+def begin_task_progress(mode, target, concurrent=1, message=""):
+    now = time.time()
+    return update_task_progress(
+        running=True,
+        mode=str(mode or "manual"),
+        target=int(target or 0),
+        success=0,
+        fail=0,
+        done=0,
+        concurrent=int(concurrent or 1),
+        started_at=now,
+        finished_at=None,
+        last_error="",
+        message=str(message or ""),
+    )
+
+
+def finish_task_progress(message="", last_error=""):
+    return update_task_progress(
+        running=False,
+        finished_at=time.time(),
+        message=str(message or ""),
+        last_error=str(last_error or ""),
+    )
+
+
 UI_BG = "#242424"
 UI_PANEL_BG = "#2b2b2b"
 UI_FG = "#f2f2f2"
@@ -148,6 +207,9 @@ DEFAULT_CONFIG = {
     "browser_shutdown_wait_sec": 4,
     "cpa_mint_async": True,
     "browser_use_custom_ua": False,
+    "browser_binary_path": "",
+    "browser_headless": False,
+    "register_headless": False,
     "log_level": "info",
     "speed_log_interval_sec": 60,
     # --- branch panel / embedded GoProxy / maintenance ---
@@ -202,6 +264,20 @@ _freemail_domains_cache_lock = threading.Lock()
 _FREEMAIL_DOMAINS_CACHE_TTL_SEC = 60.0
 _io_lock = threading.Lock()
 _stats_lock = threading.Lock()
+_TASK_PROGRESS = {
+    "running": False,
+    "mode": "",
+    "target": 0,
+    "success": 0,
+    "fail": 0,
+    "done": 0,
+    "concurrent": 0,
+    "started_at": None,
+    "finished_at": None,
+    "last_error": "",
+    "message": "",
+}
+_task_progress_lock = threading.Lock()
 _cpa_threads_lock = threading.Lock()
 _browser_lifecycle_lock = threading.RLock()
 
@@ -1357,6 +1433,40 @@ def create_browser_options():
     """
     options = ChromiumOptions()
     options.set_timeouts(base=1)
+    # Docker/Linux: prefer packaged Chromium and required sandbox flags.
+    binary = str(config.get("browser_binary_path") or os.environ.get("BROWSER_BINARY") or os.environ.get("CHROME_PATH") or "").strip()
+    if not binary:
+        for cand in (
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser",
+            "/usr/bin/google-chrome",
+            "/usr/bin/google-chrome-stable",
+        ):
+            if os.path.isfile(cand):
+                binary = cand
+                break
+    if binary:
+        try:
+            options.set_browser_path(binary)
+        except Exception:
+            options.set_argument(f"--binary-path={binary}")
+    headless = bool(config.get("browser_headless") or config.get("register_headless") or os.environ.get("REGISTER_HEADLESS") or os.environ.get("BROWSER_HEADLESS"))
+    # In container without DISPLAY, force headless.
+    if not headless and not str(os.environ.get("DISPLAY") or "").strip() and os.name != "nt":
+        headless = True
+    if headless:
+        try:
+            options.headless(True)
+        except Exception:
+            options.set_argument("--headless=new")
+    for docker_flag in (
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--disable-software-rasterizer",
+    ):
+        # Safe on desktop too; required for many container Chromium builds.
+        options.set_argument(docker_flag)
     # 并发时为每个 worker 分配独立资料目录，避免 cookie/会话互相污染
     profile_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".browser_profiles")
     try:
@@ -5427,6 +5537,7 @@ def _cli_worker_loop(worker_id, task_queue, total_count, controller, accounts_ou
                     _register_one_account_cli(log_fn, controller.should_stop, accounts_output_file)
                     with stats["lock"]:
                         stats["success"] += 1
+                        update_task_progress(success=stats["success"], fail=stats["fail"])
                         local_success += 1
                     slot_done = True
                 except RegistrationCancelled:
@@ -5440,11 +5551,13 @@ def _cli_worker_loop(worker_id, task_queue, total_count, controller, accounts_ou
                         continue
                     with stats["lock"]:
                         stats["fail"] += 1
+                        update_task_progress(success=stats["success"], fail=stats["fail"])
                     log_fn(f"[-] 当前账号已达到最大重试次数，跳过: {exc}")
                     slot_done = True
                 except Exception as exc:
                     with stats["lock"]:
                         stats["fail"] += 1
+                        update_task_progress(success=stats["success"], fail=stats["fail"])
                     log_fn(f"[-] 注册失败: {exc}")
                     slot_done = True
                 finally:
@@ -5618,6 +5731,7 @@ def run_registration_cli(count, pool_watch=None):
                     _register_one_account_cli(cli_log, controller.should_stop, accounts_output_file)
                     with stats["lock"]:
                         stats["success"] += 1
+                        update_task_progress(success=stats["success"], fail=stats["fail"], message=f"success {stats['success']}/{count}")
                     retry_count_for_slot = 0
                     i += 1
                     cli_log(f"[*] 当前统计: 成功 {stats['success']} | 失败 {stats['fail']}")
@@ -5642,12 +5756,14 @@ def run_registration_cli(count, pool_watch=None):
                     else:
                         with stats["lock"]:
                             stats["fail"] += 1
+                            update_task_progress(success=stats["success"], fail=stats["fail"], message=f"fail {stats['fail']}, done {stats['success']+stats['fail']}/{count}")
                         retry_count_for_slot = 0
                         i += 1
                         cli_log(f"[-] 当前账号已达到最大重试次数，跳过: {exc}")
                 except Exception as exc:
                     with stats["lock"]:
                         stats["fail"] += 1
+                        update_task_progress(success=stats["success"], fail=stats["fail"])
                     retry_count_for_slot = 0
                     i += 1
                     cli_log(f"[-] 注册失败: {exc}")
@@ -5686,6 +5802,8 @@ def run_registration_cli(count, pool_watch=None):
         _restore_sigint_handler(prev_handler)
         with stats["lock"]:
             ok, bad = stats["success"], stats["fail"]
+        finish_task_progress(message=f"done success={ok} fail={bad}")
+        update_task_progress(success=ok, fail=bad, running=False)
         cli_log(f"[*] 任务结束。成功 {ok} | 失败 {bad}")
 
 

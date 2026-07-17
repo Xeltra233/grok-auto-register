@@ -454,6 +454,19 @@ function applyOverview(data, opts = {}) {
   $("mPool").textContent = current ?? "-";
   if ($("mTarget")) $("mTarget").textContent = target ?? "-";
   if ($("mRemain")) $("mRemain").textContent = remain ?? "-";
+  const task = data.task || data.pool_autoreg?.progress || {};
+  const tSuccess = task.success != null ? task.success : "-";
+  const tFail = task.fail != null ? task.fail : "-";
+  const tTarget = task.target != null ? task.target : (data.config?.register_count ?? "-");
+  const tDone = task.done != null ? task.done : ((Number(tSuccess)||0)+(Number(tFail)||0));
+  if ($("mSuccess")) $("mSuccess").textContent = tSuccess;
+  if ($("mFail")) $("mFail").textContent = tFail;
+  if ($("pillTask")) {
+    const running = !!task.running || !!data.pool_autoreg?.registration_running;
+    $("pillTask").textContent = running
+      ? `手动任务进行中: 成功 ${tSuccess} / 失败 ${tFail} / 目标 ${tTarget} / 已完成 ${tDone}`
+      : `手动任务: 成功 ${tSuccess} / 失败 ${tFail} / 目标 ${tTarget}`;
+  }
   $("pillLive").textContent = `测活门槛: ${data.config?.live_inspect_enabled === false ? "关闭" : "开启"}`;
   $("pillBind").textContent = `全局代理: ${(data.config?.proxy_mode || (data.config?.goproxy_bind_register_proxy ? "goproxy" : "custom")) === "goproxy" ? "本机 GoProxy" : "自有代理"}`;
   const used = data.pool?.used_source || data.config?.pool_autoreg_source || "remote";
@@ -500,6 +513,8 @@ function applyOverview(data, opts = {}) {
     自动补货: data.pool_autoreg,
     手动注册目标数: data.config?.register_count,
     并发线程: data.config?.concurrent_count,
+    当前任务: data.task || data.pool_autoreg?.progress || {},
+    注册中: !!(data.pool_autoreg && data.pool_autoreg.registration_running),
     自动补货触发线: data.config?.pool_autoreg_min_count,
     自动补货停止目标: data.config?.pool_autoreg_target_count,
     自动补货巡检间隔秒: data.config?.pool_autoreg_interval_sec,
