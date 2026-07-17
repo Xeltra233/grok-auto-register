@@ -162,6 +162,19 @@ select:focus, input:focus {
   cursor: pointer;
   transition: .15s ease;
   font-weight: 600;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+}
+a.btn,
+a.btn:link,
+a.btn:visited,
+a.btn:hover,
+a.btn:active {
+  text-decoration: none !important;
+  color: inherit;
 }
 .btn:hover { transform: translateY(-1px); border-color: rgba(59,130,246,.28); }
 .btn.primary { background: linear-gradient(135deg, rgba(59,130,246,.95), rgba(56,189,248,.9)); border-color: transparent; color: #fff; }

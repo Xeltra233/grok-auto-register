@@ -11,6 +11,7 @@ import time
 import json
 import mimetypes
 import os
+import socket
 import re
 import threading
 import traceback
@@ -150,14 +151,86 @@ STATE = PanelState()
 GOPROXY_UI_PREFIX = "/goproxy"
 
 
-def _goproxy_webui_base() -> str:
+def _goproxy_webui_host_port() -> tuple[str, int]:
     cfg = STATE.config or {}
     host = str(cfg.get("goproxy_host") or "127.0.0.1").strip() or "127.0.0.1"
+    # container reverse-proxy must hit local loopback, not public bind
+    if host in ("0.0.0.0", "::", "[::]"):
+        host = "127.0.0.1"
     try:
         port = int(cfg.get("goproxy_webui_port") or 17878)
     except Exception:
         port = 17878
+    return host, port
+
+
+def _goproxy_webui_base() -> str:
+    host, port = _goproxy_webui_host_port()
     return f"http://{host}:{port}"
+
+
+def _goproxy_webui_ready(timeout: float = 0.2) -> bool:
+    host, port = _goproxy_webui_host_port()
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _ensure_goproxy_webui(timeout: float = 8.0) -> dict:
+    """Best-effort start embedded GoProxy so /goproxy reverse proxy can connect."""
+    cfg = STATE.config or {}
+    if _goproxy_webui_ready():
+        return {"ok": True, "already": True}
+    if not bool(cfg.get("goproxy_enabled", True)):
+        return {
+            "ok": False,
+            "error": "goproxy_enabled is false",
+            "hint": "请先在面板开启并启动本地 GoProxy，再打开 /goproxy/",
+        }
+    try:
+        res = STATE.manager.start(build_if_missing=True, wait_sec=timeout)
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+    if _goproxy_webui_ready(timeout=0.4):
+        return {"ok": True, "started": True, "result": res}
+    return {
+        "ok": False,
+        "error": (res or {}).get("error") or (res or {}).get("warning") or "GoProxy WebUI not listening",
+        "result": res,
+        "hint": "本地 GoProxy 未监听 WebUI 端口；请看面板代理状态/日志后重试",
+    }
+
+
+def _goproxy_unavailable_html(message: str, detail: str = "") -> bytes:
+    msg = str(message or "GoProxy WebUI unavailable")
+    det = str(detail or "")
+    html = f"""<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>GoProxy 管理页暂不可用</title>
+<style>
+body{{font-family:Segoe UI,Arial,sans-serif;background:#0b1220;color:#e8eefc;margin:0;padding:40px}}
+.card{{max-width:720px;margin:0 auto;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:16px;padding:24px}}
+h1{{margin:0 0 12px;font-size:22px}}
+p,li{{line-height:1.6;color:#c9d6f0}}
+code{{background:rgba(0,0,0,.35);padding:2px 6px;border-radius:6px}}
+a{{color:#8ec5ff}}
+pre{{white-space:pre-wrap;background:rgba(0,0,0,.35);padding:12px;border-radius:10px;color:#9fb3d9}}
+</style></head><body><div class="card">
+<h1>GoProxy 管理页暂不可用</h1>
+<p>{msg}</p>
+<p>入口是当前站点的 <code>/goproxy/</code>（同域反代），不需要额外开放端口，也不走浏览器访问 127.0.0.1。</p>
+<ul>
+<li>先回面板点击“启动本地代理”</li>
+<li>确认配置里 <code>goproxy_enabled=true</code></li>
+<li>再打开 <a href="/goproxy/">/goproxy/</a></li>
+</ul>
+{"<pre>"+det+"</pre>" if det else ""}
+<p><a href="/">返回面板</a></p>
+</div></body></html>"""
+    return html.encode("utf-8")
 
 
 def _rewrite_goproxy_location(value: str) -> str:
@@ -689,10 +762,27 @@ class PanelHandler(BaseHTTPRequestHandler):
         prefix = GOPROXY_UI_PREFIX
         raw_path = parsed.path or "/"
         if raw_path == prefix:
-            # normalize /goproxy -> /goproxy/
             self.send_response(302)
             self.send_header("Location", prefix + "/")
             self.end_headers()
+            return
+
+        # Ensure local webui is up before proxying; return friendly page instead of bare 502.
+        ensured = _ensure_goproxy_webui(timeout=8.0)
+        if not ensured.get("ok") and not _goproxy_webui_ready():
+            body = _goproxy_unavailable_html(
+                ensured.get("error") or "无法连接本地 GoProxy WebUI",
+                detail=str(ensured.get("hint") or ensured.get("result") or ""),
+            )
+            self.send_response(503)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            try:
+                self.wfile.write(body)
+            except Exception:
+                pass
             return
 
         rel = raw_path[len(prefix):] or "/"
@@ -703,27 +793,33 @@ class PanelHandler(BaseHTTPRequestHandler):
         if query:
             target = target + "?" + query
 
-        # read body if present
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except Exception:
             length = 0
         body = self.rfile.read(length) if length > 0 else None
 
-        # forward selected headers
         hop_by_hop = {
             "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
             "te", "trailers", "transfer-encoding", "upgrade", "host", "content-length",
+            "accept-encoding",  # force identity so we can rewrite HTML
         }
         headers = {}
         for k, v in self.headers.items():
             if k.lower() in hop_by_hop:
                 continue
-            # avoid leaking panel auth cookie name conflicts; still forward Cookie for goproxy session
+            # Do not forward panel auth cookie confusion; still pass other cookies.
+            if k.lower() == "cookie":
+                # keep both panel and goproxy cookies; goproxy only needs its session
+                headers[k] = v
+                continue
             headers[k] = v
         headers["Host"] = urlparse(_goproxy_webui_base()).netloc
+        headers["Accept-Encoding"] = "identity"
         headers["X-Forwarded-Prefix"] = prefix
-        headers["X-Forwarded-Proto"] = "https" if (self.headers.get("X-Forwarded-Proto") or "").lower() == "https" else "http"
+        headers["X-Forwarded-Proto"] = (
+            "https" if (self.headers.get("X-Forwarded-Proto") or "").lower() == "https" else "http"
+        )
         headers["X-Forwarded-Host"] = self.headers.get("Host") or ""
 
         req = Request(target, data=body, headers=headers, method=self.command)
@@ -737,35 +833,54 @@ class PanelHandler(BaseHTTPRequestHandler):
             status = int(getattr(exc, "code", 502) or 502)
             resp_headers = dict(exc.headers.items()) if getattr(exc, "headers", None) is not None else {}
         except Exception as exc:
-            return _json_response(
-                self,
-                502,
-                {
-                    "ok": False,
-                    "error": f"goproxy webui proxy failed: {exc}",
-                    "target": target,
-                    "hint": "请先在面板启动本地 GoProxy；管理页通过 /goproxy/ 同域访问，无需额外开放端口",
-                },
+            page = _goproxy_unavailable_html(
+                f"反代连接失败: {exc}",
+                detail=f"target={target}",
             )
+            self.send_response(503)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(page)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            try:
+                self.wfile.write(page)
+            except Exception:
+                pass
+            return
 
         ctype = str(resp_headers.get("Content-Type") or resp_headers.get("content-type") or "")
-        if "text/html" in ctype.lower():
-            resp_body = _rewrite_goproxy_html(resp_body)
+        if "text/html" in ctype.lower() or "javascript" in ctype.lower() or "json" not in ctype.lower() and rel in ("/", "/login", "/logout"):
+            if b"<html" in resp_body[:500].lower() or b"<!doctype" in resp_body[:500].lower() or "text/html" in ctype.lower():
+                resp_body = _rewrite_goproxy_html(resp_body)
 
         self.send_response(status)
-        skip = {"content-length", "transfer-encoding", "connection", "content-encoding"}
+        skip = {
+            "content-length", "transfer-encoding", "connection", "content-encoding",
+            "content-security-policy",  # avoid blocking rewritten inline script
+        }
+        # handle multiple set-cookie via get_all if available
+        set_cookies = []
+        if hasattr(resp_headers, "get_all"):
+            try:
+                set_cookies = resp_headers.get_all("Set-Cookie") or []
+            except Exception:
+                set_cookies = []
+        # resp_headers is plain dict from items(); recover single
+        if not set_cookies:
+            sc = resp_headers.get("Set-Cookie") or resp_headers.get("set-cookie")
+            if sc:
+                set_cookies = [sc]
+
         for k, v in resp_headers.items():
             lk = k.lower()
-            if lk in skip:
+            if lk in skip or lk == "set-cookie":
                 continue
             if lk == "location":
                 self.send_header("Location", _rewrite_goproxy_location(v))
                 continue
-            if lk == "set-cookie":
-                # may be multi; BaseHTTP one header at a time
-                self.send_header("Set-Cookie", _rewrite_set_cookie(v))
-                continue
             self.send_header(k, v)
+        for sc in set_cookies:
+            self.send_header("Set-Cookie", _rewrite_set_cookie(sc))
         self.send_header("Content-Length", str(len(resp_body)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
@@ -775,6 +890,7 @@ class PanelHandler(BaseHTTPRequestHandler):
             pass
 
     def _serve_static(self, rel: str):
+
 
         rel = rel.replace("\\", "/").lstrip("/")
         if not rel:
