@@ -150,8 +150,8 @@ DEFAULT_CONFIG = {
     "log_max_total_mb": 512,
     "log_cleanup_interval_sec": 3600,
     "log_cleanup_globs": "*.log,*.err,live-*.log",
-    "live_inspect_enabled": False,
-    "success_require_live": False,
+    "live_inspect_enabled": True,
+    "success_require_live": True,
     "pool_autoreg_enabled": False,
     "pool_autoreg_min_count": 5,
     "pool_autoreg_batch": 3,
@@ -1197,13 +1197,13 @@ def persist_successful_account(email, password, sso, accounts_output_file, log_c
 
 
 def run_success_live_gate(email, password, sso, log_callback=None, page=None):
-    """Post-registration CPA/live step (Aaron-style: does not block account save by default).
+    """Post-registration CPA/live gate.
 
-    Default: always ok=True so account is persisted first; CPA failure is warning-only.
-    If success_require_live=True, restore hard gate semantics.
+    Default (success_require_live=True): CPA mint + live inspect must pass.
+    If success_require_live=False: CPA/live failure is warning-only.
     """
-    require_live = bool(config.get("success_require_live", False))
-    live_enabled = bool(config.get("live_inspect_enabled", False))
+    require_live = bool(config.get("success_require_live", True))
+    live_enabled = bool(config.get("live_inspect_enabled", True))
     cpa_enabled = bool(config.get("cpa_export_enabled", True))
 
     if not cpa_enabled and not require_live and not live_enabled:
@@ -1225,6 +1225,9 @@ def run_success_live_gate(email, password, sso, log_callback=None, page=None):
             )
         except Exception as exc:
             if log_callback:
+                if require_live:
+                log_callback(f"[!] CPA 导出异常: {exc}")
+            else:
                 log_callback(f"[!] CPA 导出异常，账号结果仍将保留: {exc}")
             if require_live:
                 return {"ok": False, "cpa_result": None, "live": None, "error": str(exc)}
@@ -1302,7 +1305,7 @@ def export_cpa_xai_for_account(email, password, sso=None, log_callback=None, pag
         )
     except Exception as exc:
         if log_callback:
-            log_callback(f"[!] CPA 导出异常（已跳过测活门槛）: {exc}")
+            log_callback(f"[!] CPA 导出异常: {exc}")
         return {"ok": False, "error": str(exc)}
 
 
@@ -5129,7 +5132,16 @@ class GrokRegisterGUI:
                 log_fn(f"[+] NSFW 开启成功: {nsfw_msg}")
             else:
                 log_fn(f"[!] NSFW 开启失败（可继续）: {nsfw_msg}")
-        # Aaron-style: persist account first; CPA/token conversion is post-process.
+        # Gate first: live/CPA fail counts as registration failure (no success save).
+        gate = run_success_live_gate(
+            email,
+            profile.get("password", ""),
+            sso,
+            log_callback=log_fn,
+            page=None if bool(config.get("cpa_mint_async", True)) else _cpa_page,
+        )
+        if not gate.get("ok"):
+            raise Exception(gate.get("error") or "live inspect / CPA gate failed")
         persist_out = persist_successful_account(
             email,
             profile.get("password", ""),
@@ -5138,15 +5150,6 @@ class GrokRegisterGUI:
             log_callback=log_fn,
             profile=profile,
         )
-        gate = run_success_live_gate(
-            email,
-            profile.get("password", ""),
-            sso,
-            log_callback=log_fn,
-            page=None if bool(config.get("cpa_mint_async", True)) else _cpa_page,
-        )
-        if not gate.get("ok") and bool(config.get("success_require_live", False)):
-            raise Exception(gate.get("error") or "live inspect gate failed")
         with _stats_lock:
             self.results.append({
                 "email": email,
@@ -5336,7 +5339,16 @@ def _register_one_account_cli(log_fn, stop_fn, accounts_output_file):
             log_fn(f"[+] NSFW 开启成功: {nsfw_msg}")
         else:
             log_fn(f"[!] NSFW 开启失败（可继续）: {nsfw_msg}")
-    # Aaron-style: persist account first; CPA/token conversion is post-process.
+    # Gate first: live/CPA fail counts as registration failure (no success save).
+    gate = run_success_live_gate(
+        email,
+        profile.get("password", ""),
+        sso,
+        log_callback=log_fn,
+        page=None if bool(config.get("cpa_mint_async", True)) else _cpa_page,
+    )
+    if not gate.get("ok"):
+        raise Exception(gate.get("error") or "live inspect / CPA gate failed")
     persist_successful_account(
         email,
         profile.get("password", ""),
@@ -5345,15 +5357,6 @@ def _register_one_account_cli(log_fn, stop_fn, accounts_output_file):
         log_callback=log_fn,
         profile=profile,
     )
-    gate = run_success_live_gate(
-        email,
-        profile.get("password", ""),
-        sso,
-        log_callback=log_fn,
-        page=None if bool(config.get("cpa_mint_async", True)) else _cpa_page,
-    )
-    if not gate.get("ok") and bool(config.get("success_require_live", False)):
-        raise Exception(gate.get("error") or "live inspect gate failed")
     log_fn(f"[+] 注册成功: {email}")
 
 

@@ -25,26 +25,31 @@ class InspectClassifyTests(unittest.TestCase):
 
 
 class SuccessGateSourceTests(unittest.TestCase):
-    def test_register_uses_save_first_then_cpa(self):
+    def test_register_uses_gate_then_save(self):
         src = open("grok_register_ttk.py", "r", encoding="utf-8").read()
         self.assertIn("def run_success_live_gate(", src)
         self.assertIn("def persist_successful_account(", src)
         self.assertIn("success_require_live", src)
         self.assertIn("from account_outputs import append_account_line", src)
         self.assertIn("queue_unsaved_account", src)
-        # Aaron-style: persist appears before gate in both success paths
-        gui_idx = src.find("self.accounts_output_file")
-        self.assertGreater(gui_idx, 0)
-        # save-first marker
-        self.assertIn("Aaron-style: persist account first", src)
-        self.assertIn("CPA mint + 凭证转换（失败不阻断账号保存）", src)
-        # defaults no longer hard-require live
-        self.assertIn('"success_require_live": False', src)
+        # Hard gate: live/CPA fail is registration failure; save only after pass.
+        self.assertIn("Gate first: live/CPA fail counts as registration failure", src)
+        self.assertIn("if not gate.get(\"ok\"):", src)
+        self.assertIn("live inspect / CPA gate failed", src)
+        self.assertIn('"success_require_live": True', src)
+        self.assertIn('"live_inspect_enabled": True', src)
         self.assertIn('"cpa_prefer_auth_code": False', src)
         self.assertIn('"cpa_force_standalone": True', src)
+        # both GUI/CLI: gate call appears before persist_successful_account near success paths
+        gui_marker = src.find("Gate first: live/CPA fail counts as registration failure")
+        self.assertGreater(gui_marker, 0)
+        gate_idx = src.find("gate = run_success_live_gate(", gui_marker)
+        persist_idx = src.find("persist_successful_account(", gate_idx)
+        self.assertGreater(persist_idx, gate_idx)
         mint = open("cpa_xai/mint.py", "r", encoding="utf-8").read()
         self.assertIn("prefer_auth_code: bool = False", mint)
         self.assertIn("force_standalone: bool = True", mint)
+        self.assertIn('result["discarded"] = True', mint)
 
 
 class AccountOutputsTests(unittest.TestCase):
