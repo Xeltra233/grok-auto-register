@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """Live inspection helpers inspired by ywddd/grok-inspection.
 
 Probe xAI/Grok credentials via cli-chat-proxy and classify:

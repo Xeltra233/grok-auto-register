@@ -152,6 +152,8 @@ DEFAULT_CONFIG = {
     "log_max_total_mb": 512,
     "log_cleanup_interval_sec": 3600,
     "log_cleanup_globs": "*.log,*.err,live-*.log",
+    "live_inspect_enabled": True,
+    "success_require_live": True,
 }
 
 config = DEFAULT_CONFIG.copy()

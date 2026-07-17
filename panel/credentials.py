@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """Local CPA credential vault helpers for the branch panel.
 
 Supports:

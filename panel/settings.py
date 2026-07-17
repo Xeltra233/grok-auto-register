@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """Branch-panel configuration schema and helpers.
 
 Keeps GoProxy ports/modes, web panel and log cleanup defaults
@@ -98,6 +98,9 @@ PANEL_DEFAULTS = {
     "log_max_total_mb": 512,
     "log_cleanup_interval_sec": 3600,
     "log_cleanup_globs": "*.log,*.err,live-*.log",
+    # Live inspect gate (grok-inspection style)
+    "live_inspect_enabled": True,
+    "success_require_live": True,
 }
 
 
@@ -312,6 +315,8 @@ def normalize_branch_config(cfg):
     out["log_max_total_mb"] = _as_int(out.get("log_max_total_mb"), 512, minimum=1)
     out["log_cleanup_interval_sec"] = _as_int(out.get("log_cleanup_interval_sec"), 3600, minimum=60)
     out["log_cleanup_globs"] = _as_str(out.get("log_cleanup_globs"), "*.log,*.err,live-*.log")
+    out["live_inspect_enabled"] = _as_bool(out.get("live_inspect_enabled"), True)
+    out["success_require_live"] = _as_bool(out.get("success_require_live"), True)
 
     return out
 

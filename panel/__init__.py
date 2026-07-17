@@ -1,1 +1,1 @@
-﻿# panel package for web dashboard / shared branch settings
+"""Branch panel package: web dashboard, GoProxy manager, browser monitor, credentials."""

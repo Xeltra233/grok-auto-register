@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 import unittest
 from cpa_xai.inspect import classify_probe, is_live_pass, is_free_usage_exhausted
 

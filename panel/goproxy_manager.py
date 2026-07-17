@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """Local GoProxy process manager for the merged branch.
 
 Starts/stops the vendored GoProxy as a subprocess on localhost ports:

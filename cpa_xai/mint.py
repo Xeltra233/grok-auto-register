@@ -1,4 +1,4 @@
-﻿"""High-level: mint CPA xai-*.json for one free registered account."""
+"""High-level: mint CPA xai-*.json for one free registered account."""
 
 from __future__ import annotations
 
