@@ -310,3 +310,92 @@ def delete_credentials(
 
 def delete_all_uploaded(config: Optional[dict] = None, root: Optional[Path] = None) -> dict[str, Any]:
     return delete_credentials(select_all=True, config=config, bucket="uploaded", root=root)
+
+
+def prune_local_credentials(
+    config: Optional[dict] = None,
+    *,
+    root: Optional[Path] = None,
+    keep: Optional[int] = None,
+    buckets: Optional[Iterable[str]] = None,
+    enabled: Optional[bool] = None,
+) -> dict[str, Any]:
+    """Keep only the newest N local credential files; delete older ones.
+
+    Default off. When enabled, sorts by mtime desc and retains `keep` files
+    across selected buckets (default: uploaded + pending).
+    """
+    cfg = dict(config or {})
+    if enabled is None:
+        enabled = bool(cfg.get("local_cred_retain_enabled", False))
+    if not enabled:
+        listing = list_credentials(cfg, buckets=buckets or ("uploaded", "pending"), root=root)
+        return {
+            "ok": True,
+            "skipped": True,
+            "reason": "disabled",
+            "enabled": False,
+            "keep": int(cfg.get("local_cred_retain_count") or 0),
+            "before": int(listing.get("total") or 0),
+            "after": int(listing.get("total") or 0),
+            "deleted": [],
+            "deleted_count": 0,
+        }
+
+    try:
+        keep_n = int(keep if keep is not None else (cfg.get("local_cred_retain_count") or 0))
+    except Exception:
+        keep_n = 0
+    keep_n = max(keep_n, 0)
+
+    use_buckets = [b.strip().lower() for b in (buckets or ("uploaded", "pending")) if str(b).strip()]
+    if not use_buckets:
+        use_buckets = ["uploaded", "pending"]
+
+    listing = list_credentials(cfg, buckets=use_buckets, root=root)
+    items = list(listing.get("items") or [])
+    # newest first
+    items.sort(key=lambda it: int(it.get("mtime") or 0), reverse=True)
+    before = len(items)
+    if keep_n <= 0:
+        # keep 0 means delete all selected local credentials
+        victims = items
+    else:
+        victims = items[keep_n:]
+
+    deleted: list[dict[str, str]] = []
+    errors: list[dict[str, str]] = []
+    # delete per-bucket to reuse path safety
+    by_bucket: dict[str, list[str]] = {}
+    for it in victims:
+        b = str(it.get("bucket") or "uploaded")
+        n = str(it.get("name") or "")
+        if not n:
+            continue
+        by_bucket.setdefault(b, []).append(n)
+
+    for bkt, names in by_bucket.items():
+        try:
+            res = delete_credentials(names, config=cfg, bucket=bkt, root=root)
+            for name in res.get("deleted") or []:
+                deleted.append({"name": name, "bucket": bkt})
+            for err in res.get("errors") or []:
+                errors.append({"bucket": bkt, **(err if isinstance(err, dict) else {"error": str(err)})})
+        except Exception as exc:
+            errors.append({"bucket": bkt, "error": str(exc)[:300]})
+
+    after_listing = list_credentials(cfg, buckets=use_buckets, root=root)
+    return {
+        "ok": not errors,
+        "skipped": False,
+        "enabled": True,
+        "keep": keep_n,
+        "before": before,
+        "after": int(after_listing.get("total") or 0),
+        "deleted": deleted,
+        "deleted_count": len(deleted),
+        "errors": errors,
+        "buckets": use_buckets,
+        "auth_dir": after_listing.get("auth_dir") or listing.get("auth_dir"),
+    }
+
