@@ -2299,6 +2299,7 @@ def finalize_all_browsers(log_callback=None, reason="task end cleanup"):
 
     Mint browsers are thread-local/reused and are NOT closed when CPA mint threads
     finish successfully; only recycle/failure paths quit them. Always sweep here.
+    Also kill orphan DrissionPage autoPortData / project profile Chromium roots.
     """
     if log_callback:
         log_callback(f"[*] {reason}: close register browsers and CPA mint leftovers")
@@ -2318,6 +2319,11 @@ def finalize_all_browsers(log_callback=None, reason="task end cleanup"):
     except Exception as exc:
         if log_callback:
             log_callback(f"[Debug] mint browser finalize failed: {exc}")
+    try:
+        cleanup_orphan_browsers(log_callback=log_callback, reason=reason)
+    except Exception as exc:
+        if log_callback:
+            log_callback(f"[Debug] orphan browser cleanup failed: {exc}")
 
 
 def _wait_cpa_async_threads(timeout=300, log_callback=None, skip_if_stopping=None):
@@ -2564,6 +2570,26 @@ def _force_kill_pid_tree(pid, log_callback=None):
     return killed
 
 
+def cleanup_orphan_browsers(log_callback=None, reason="orphan cleanup"):
+    """Kill leftover managed Chromium roots (project profiles / Drission autoPort)."""
+    try:
+        from panel.browser_monitor import cleanup_zombies
+    except Exception as exc:
+        if log_callback:
+            log_callback(f"[Debug] orphan cleanup unavailable: {exc}")
+        return {"ok": False, "error": str(exc)}
+
+    root = os.path.dirname(os.path.abspath(__file__))
+    res = cleanup_zombies(project_root=root, kill=True)
+    killed = int(res.get("killed_count") or 0)
+    if log_callback:
+        log_callback(
+            f"[*] {reason}: orphan browsers before={res.get('before_zombies')} "
+            f"killed={killed} after={res.get('after_zombies')}"
+        )
+    return res
+
+
 def _quit_browser_instance(browser, log_callback=None, del_data=True):
     """Graceful quit first, then force-kill residual Chromium processes."""
     if browser is None:
@@ -2696,6 +2722,11 @@ def stop_browser(log_callback=None):
                     shutil.rmtree(abs_profile, ignore_errors=True)
             except Exception:
                 pass
+        # Always sweep managed leftovers (Drission autoPort / .browser_profiles).
+        try:
+            cleanup_orphan_browsers(log_callback=log_callback, reason="stop_browser sweep")
+        except Exception:
+            pass
 
 
 def restart_browser(log_callback=None):
@@ -2815,6 +2846,11 @@ def cleanup_runtime_memory(log_callback=None, reason="定期清理"):
     except Exception as exc:
         if log_callback:
             log_callback(f"[Debug] mint browser cleanup failed: {exc}")
+    try:
+        cleanup_orphan_browsers(log_callback=log_callback, reason=reason)
+    except Exception as exc:
+        if log_callback:
+            log_callback(f"[Debug] orphan browser cleanup failed: {exc}")
     collected = gc.collect()
     if log_callback:
         log_callback(f"[*] Python GC 已回收对象数: {collected}")

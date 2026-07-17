@@ -143,6 +143,34 @@ class BrowserMonitorTests(unittest.TestCase):
         self.assertFalse(monitor_status()["running"])
 
 
+
+    def test_scan_classifies_drission_autoport_zombie(self):
+        root = os.path.abspath(os.getcwd())
+
+        def fake_iter():
+            return [
+                {
+                    "pid": 15728,
+                    "ppid": 1,
+                    "name": "chrome.exe",
+                    "cmdline": r"C:\Users\Xeltra\AppData\Local\Google\Chrome\Application\chrome.exe --remote-debugging-port=10791 --user-data-dir=C:\Users\Xeltra\AppData\Local\Temp\DrissionPage\autoPortData\10791",
+                    "create_time": time.time(),
+                },
+                {
+                    "pid": 2024,
+                    "ppid": 1,
+                    "name": "chrome.exe",
+                    "cmdline": r"C:\Users\Xeltra\AppData\Local\Google\Chrome\Application\chrome.exe --user-data-dir=C:\Users\Xeltra\AppData\Local\Google\Chrome\User Data",
+                    "create_time": time.time(),
+                },
+            ]
+
+        with patch("panel.browser_monitor._pid_is_running", return_value=False):
+            snap = scan_browser_processes(project_root=root, process_iter=fake_iter)
+        self.assertEqual([p["pid"] for p in snap["zombies"]], [15728])
+        self.assertEqual(snap["foreign_root_browsers"], 1)
+
+
 class LogCleanupTests(unittest.TestCase):
     def test_age_and_size_cleanup(self):
         with tempfile.TemporaryDirectory() as td:

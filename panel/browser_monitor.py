@@ -200,6 +200,21 @@ def _iter_chrome_processes():
             continue
 
 
+def _is_managed_browser_cmd(cmd_norm: str, profile_marker: str) -> bool:
+    """True for project profiles or DrissionPage autoPort leftovers."""
+    c = str(cmd_norm or "").lower().replace("\\", "/")
+    if profile_marker and profile_marker in c:
+        return True
+    if ".browser_profiles" in c:
+        return True
+    # Main-branch / DrissionPage default auto port profile leftovers.
+    if "drissionpage" in c and "autoportdata" in c:
+        return True
+    if "remote-debugging-port=" in c and "drissionpage" in c:
+        return True
+    return False
+
+
 def _classify_browser_roots(
     roots: List[dict],
     *,
@@ -212,7 +227,7 @@ def _classify_browser_roots(
     foreign_roots = []
     for p in roots:
         cmd_norm = str(p.get("cmdline") or "").replace("\\", "/").lower()
-        if profile_marker in cmd_norm or ".browser_profiles" in cmd_norm:
+        if _is_managed_browser_cmd(cmd_norm, profile_marker):
             project_roots.append(p)
         else:
             foreign_roots.append(p)
@@ -343,6 +358,22 @@ def cleanup_zombies(
         "pruned": prune,
         "scan": after,
     }
+
+
+def cleanup_managed_orphans(
+    project_root: Optional[str] = None,
+    *,
+    kill: bool = True,
+    process_iter: Optional[Callable[[], Any]] = None,
+    kill_fn: Optional[Callable[[int], None]] = None,
+) -> dict:
+    """Kill unmanaged project/DrissionPage browser roots (not in registry)."""
+    return cleanup_zombies(
+        project_root=project_root,
+        kill=kill,
+        process_iter=process_iter,
+        kill_fn=kill_fn,
+    )
 
 
 def summary(
