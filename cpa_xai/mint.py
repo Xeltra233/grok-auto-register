@@ -248,7 +248,7 @@ def mint_and_export(
                     result["probe_warning"] = msg
                     log(f"WARN soft chat probe fail: {msg}")
 
-    # grok-inspection style conversation live-check is the hard gate for keep/push.
+    # Optional live-check. Fail => discard written auth file (do not keep/push).
     if live_inspect and result.get("ok"):
         live = inspect_access_token(
             access,
@@ -266,14 +266,16 @@ def mint_and_export(
                 f"live inspect failed: {live.get('classification')}: {live.get('reason')}"
             )
 
+    # Gate failed after write: delete the file. No quarantine, no keep.
     if not result.get("ok") and result.get("path"):
-        q = quarantine_auth_file(
-            result["path"],
-            reason=str(result.get("error") or "probe/cli gate failed"),
-            log=log,
-        )
-        if q is not None:
-            result["path"] = str(q)
-            result["quarantined"] = True
+        bad_path = Path(str(result["path"]))
+        try:
+            if bad_path.is_file():
+                bad_path.unlink()
+                log(f"discarded auth file (gate failed): {bad_path.name}")
+        except OSError as exc:
+            log(f"discard auth file failed: {bad_path}: {exc}")
+        result["path"] = None
+        result["discarded"] = True
 
     return result

@@ -134,7 +134,7 @@ class MintPrefersAuthCodeTests(unittest.TestCase):
             self.assertIn("referrer", result.get("error", "").lower())
             self.assertEqual(list(pending.glob("xai-*.json")), [])
 
-    def test_probe_fail_quarantines_file(self):
+    def test_probe_fail_discards_file(self):
         access = _fake_jwt(
             {
                 "referrer": GROK_REFERRER,
@@ -169,10 +169,10 @@ class MintPrefersAuthCodeTests(unittest.TestCase):
                     live_inspect=False,
                 )
             self.assertFalse(result["ok"])
-            self.assertTrue(result.get("quarantined"))
+            self.assertTrue(result.get("discarded"))
+            self.assertIsNone(result.get("path"))
             self.assertEqual(list(pending.glob("xai-*.json")), [])
-            self.assertTrue((root / "quarantine").exists())
-            self.assertTrue(list((root / "quarantine").glob("xai-*.json")))
+            self.assertFalse((root / "quarantine").exists())
 
 
 
