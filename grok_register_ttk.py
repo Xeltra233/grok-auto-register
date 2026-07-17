@@ -5,8 +5,14 @@ Grok 注册机 - TTK GUI 版本
 整合 DrissionPage_example.py, openai_register.py, batch_open_nsfw.py
 """
 
-import tkinter as tk
-from tkinter import ttk, messagebox, scrolledtext
+try:
+    import tkinter as tk
+    from tkinter import ttk, messagebox, scrolledtext
+except Exception:  # pragma: no cover - Docker/panel headless path
+    tk = None
+    ttk = None
+    messagebox = None
+    scrolledtext = None
 import threading
 import datetime
 import tempfile
@@ -2660,6 +2666,8 @@ def _set_worker_id(wid):
 
 
 def setup_light_theme(root):
+    if tk is None or ttk is None:
+        return
     try:
         root.option_add("*Background", UI_BG)
         root.option_add("*Foreground", UI_FG)
@@ -2712,7 +2720,9 @@ def tk_entry(parent, textvariable=None, width=30, **kwargs):
     )
 
 
-def tk_button(parent, text="", command=None, state=tk.NORMAL, **kwargs):
+def tk_button(parent, text="", command=None, state=None, **kwargs):
+    if state is None:
+        state = tk.NORMAL
     return tk.Button(
         parent,
         text=text,
@@ -5884,6 +5894,12 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1].strip().lower() in ("start", "cli", "--cli"):
         main_cli()
         return
+    if tk is None:
+        raise SystemExit(
+            "tkinter is unavailable in this environment. "
+            "Use CLI mode: python grok_register_ttk.py cli --start --count N "
+            "or start the web panel via main.py / run_branch.py panel"
+        )
     root = tk.Tk()
     setup_light_theme(root)
     app = GrokRegisterGUI(root)
