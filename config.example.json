@@ -104,5 +104,9 @@
   "log_cleanup_globs": "*.log,*.err,live-*.log",
   "live_inspect_enabled": true,
   "success_require_live": true,
+  "pool_autoreg_enabled": false,
+  "pool_autoreg_min_count": 5,
+  "pool_autoreg_batch": 3,
+  "pool_autoreg_interval_sec": 300,
   "cpa_probe_chat": false
 }

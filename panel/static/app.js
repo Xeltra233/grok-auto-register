@@ -170,6 +170,8 @@ function applyOverview(data) {
       project_browsers: data.browsers?.project_browsers,
     },
     log_cleanup: data.log_cleanup,
+    pool: data.pool,
+    pool_autoreg: data.pool_autoreg,
     browser_cleanup: data.browser_cleanup,
     ts: data.ts,
   }, null, 2);

@@ -154,6 +154,10 @@ DEFAULT_CONFIG = {
     "log_cleanup_globs": "*.log,*.err,live-*.log",
     "live_inspect_enabled": True,
     "success_require_live": True,
+    "pool_autoreg_enabled": False,
+    "pool_autoreg_min_count": 5,
+    "pool_autoreg_batch": 3,
+    "pool_autoreg_interval_sec": 300,
 }
 
 config = DEFAULT_CONFIG.copy()

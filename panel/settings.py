@@ -101,6 +101,11 @@ PANEL_DEFAULTS = {
     # Live inspect gate (grok-inspection style)
     "live_inspect_enabled": True,
     "success_require_live": True,
+    # Account-pool auto registration
+    "pool_autoreg_enabled": False,
+    "pool_autoreg_min_count": 5,
+    "pool_autoreg_batch": 3,
+    "pool_autoreg_interval_sec": 300,
 }
 
 
@@ -317,6 +322,10 @@ def normalize_branch_config(cfg):
     out["log_cleanup_globs"] = _as_str(out.get("log_cleanup_globs"), "*.log,*.err,live-*.log")
     out["live_inspect_enabled"] = _as_bool(out.get("live_inspect_enabled"), True)
     out["success_require_live"] = _as_bool(out.get("success_require_live"), True)
+    out["pool_autoreg_enabled"] = _as_bool(out.get("pool_autoreg_enabled"), False)
+    out["pool_autoreg_min_count"] = _as_int(out.get("pool_autoreg_min_count"), 5, minimum=0)
+    out["pool_autoreg_batch"] = _as_int(out.get("pool_autoreg_batch"), 3, minimum=1)
+    out["pool_autoreg_interval_sec"] = _as_int(out.get("pool_autoreg_interval_sec"), 300, minimum=30)
 
     return out
 

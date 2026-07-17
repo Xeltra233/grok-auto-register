@@ -24,6 +24,13 @@ from panel.credentials import (
 )
 from panel.goproxy_manager import get_manager
 from panel.log_cleanup import cleanup_logs, loop_status as log_cleanup_status, start_log_cleanup_loop, stop_log_cleanup_loop
+from panel.pool_autoreg import (
+    evaluate_and_maybe_trigger as pool_autoreg_tick,
+    pool_counts,
+    start_pool_autoreg_loop,
+    status as pool_autoreg_status,
+    stop_pool_autoreg_loop,
+)
 from panel.settings import (
     GOPROXY_ENDPOINTS,
     GOPROXY_POOL_MODES,
@@ -188,6 +195,8 @@ class PanelHandler(BaseHTTPRequestHandler):
             "log_cleanup": STATE.last_log_cleanup,
             "log_cleanup_loop": log_cleanup_status(),
             "browser_cleanup": STATE.last_browser_cleanup,
+            "pool": pool_counts(cfg, root=str(STATE.root)),
+            "pool_autoreg": pool_autoreg_status(),
             "config": {
                 "panel_host": cfg.get("panel_host"),
                 "panel_port": cfg.get("panel_port"),
@@ -196,6 +205,10 @@ class PanelHandler(BaseHTTPRequestHandler):
                 "goproxy_bind_register_proxy": cfg.get("goproxy_bind_register_proxy"),
                 "live_inspect_enabled": cfg.get("live_inspect_enabled", True),
                 "success_require_live": cfg.get("success_require_live", True),
+                "pool_autoreg_enabled": cfg.get("pool_autoreg_enabled", False),
+                "pool_autoreg_min_count": cfg.get("pool_autoreg_min_count", 5),
+                "pool_autoreg_batch": cfg.get("pool_autoreg_batch", 3),
+                "pool_autoreg_interval_sec": cfg.get("pool_autoreg_interval_sec", 300),
             },
             "modes": list(GOPROXY_POOL_MODES),
             "endpoints": list(GOPROXY_ENDPOINTS.keys()),
@@ -252,6 +265,10 @@ class PanelHandler(BaseHTTPRequestHandler):
             return _json_response(self, 200, self._overview_payload())
         if path == "/api/browsers":
             return _json_response(self, 200, browser_summary(project_root=str(STATE.root)))
+        if path == "/api/pool":
+            counts = pool_counts(cfg, root=str(STATE.root))
+            return _json_response(self, 200, {"ok": True, "counts": counts, "autoreg": pool_autoreg_status()})
+
         if path == "/api/goproxy/status":
             return _json_response(self, 200, STATE.manager.status())
         if path == "/api/credentials":
@@ -291,6 +308,9 @@ class PanelHandler(BaseHTTPRequestHandler):
 
     def _api_post(self, path: str, body: dict):
         cfg = STATE.reload()
+        if path == "/api/pool/check":
+            res = pool_autoreg_tick(cfg, root=str(STATE.root), force=bool(body.get("force", False)))
+            return _json_response(self, 200, res)
         if path == "/api/browsers/cleanup":
             res = cleanup_zombies(project_root=str(STATE.root), kill=bool(body.get("kill", True)))
             STATE.last_browser_cleanup = {
@@ -403,11 +423,13 @@ class PanelServer:
         port: int = 8787,
         start_browser_monitor: bool = True,
         start_log_cleanup: bool = True,
+        start_pool_autoreg: bool = True,
     ):
         self.host = host
         self.port = int(port)
         self.start_browser_monitor = bool(start_browser_monitor)
         self.start_log_cleanup = bool(start_log_cleanup)
+        self.start_pool_autoreg = bool(start_pool_autoreg)
         self._httpd: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
 
@@ -457,6 +479,28 @@ class PanelServer:
             run_immediately=True,
         )
 
+    def _maybe_start_pool_autoreg(self):
+        if not self.start_pool_autoreg:
+            return
+        cfg = STATE.config or {}
+        if not bool(cfg.get("pool_autoreg_enabled", False)):
+            return
+
+        def _cfg_provider():
+            current = STATE.reload()
+            out = dict(current)
+            out["_project_root"] = str(STATE.root)
+            return out
+
+        start_pool_autoreg_loop(
+            project_root=str(STATE.root),
+            interval_sec=float(cfg.get("pool_autoreg_interval_sec") or 300),
+            enabled=True,
+            config_provider=_cfg_provider,
+            run_immediately=True,
+        )
+
+
     def start(self):
         if self._httpd is not None:
             return
@@ -472,6 +516,10 @@ class PanelServer:
             self._maybe_start_log_cleanup()
         except Exception:
             pass
+        try:
+            self._maybe_start_pool_autoreg()
+        except Exception:
+            pass
 
     def stop(self):
         if self._httpd is None:
@@ -482,6 +530,10 @@ class PanelServer:
             pass
         try:
             stop_log_cleanup_loop()
+        except Exception:
+            pass
+        try:
+            stop_pool_autoreg_loop()
         except Exception:
             pass
         self._httpd.shutdown()
