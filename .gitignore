@@ -1,4 +1,4 @@
-__pycache__/
+﻿__pycache__/
 *.pyc
 *.pyo
 *.pyd
@@ -25,3 +25,14 @@ config.local.json
 DrissionPage/
 autoPortData/
 .browser_profiles/
+
+# Branch panel / embedded GoProxy
+third_party/goproxy/bin/
+third_party/goproxy/data/
+third_party/goproxy/*.exe
+third_party/goproxy/proxygo
+data/goproxy/*
+!data/goproxy/.gitkeep
+logs/*
+!logs/.gitkeep
+panel/__pycache__/

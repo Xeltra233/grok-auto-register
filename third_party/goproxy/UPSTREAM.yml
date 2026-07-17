@@ -1,0 +1,17 @@
+﻿upstream: https://github.com/isboyjc/GoProxy
+fetched_at: 2026-07-17
+ref: main
+commit_hint: 49e99a526e6beaa518efd0392735a908902276ce
+ports:
+  http_lowest_latency: 7776
+  http_random: 7777
+  webui: 7778
+  socks5_random: 7779
+  socks5_lowest_latency: 7780
+modes:
+  - mixed_custom_first
+  - mixed_free_first
+  - mixed_equal
+  - custom_only
+  - free_only
+notes: nested .git removed; optional binaries live under bin/ and are gitignored
