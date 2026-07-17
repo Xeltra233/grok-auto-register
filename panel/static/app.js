@@ -626,8 +626,10 @@ async function loadLogList() {
   if (!state.logFiles.length) {
     const opt = document.createElement("option");
     opt.value = "";
-    opt.textContent = "暂无日志文件";
+    opt.textContent = "暂无日志文件（启动手动注册后会生成 logs/register-*.log）";
     sel.appendChild(opt);
+    if ($("logView")) $("logView").textContent = "暂无日志文件。\n\n说明：\n1) 手动注册日志会写入 logs/register-*.log 与 register-latest.log\n2) GoProxy 日志在 data/goproxy/goproxy.manager.log\n3) 若刚部署，先点一次手动注册或启动本地代理，再点“刷新列表”";
+    if ($("logMeta")) $("logMeta").textContent = "无文件";
     return res;
   }
   state.logFiles.forEach((f) => {
@@ -637,8 +639,15 @@ async function loadLogList() {
     opt.textContent = `[${f.source_label || f.source}] ${f.name} (${fmtSize(f.size || 0)}) ${when}`;
     sel.appendChild(opt);
   });
-  const exists = state.logFiles.some((f) => f.id === prev);
-  sel.value = exists ? prev : state.logFiles[0].id;
+  let preferred = "";
+  if (state.logFiles.some((f) => f.id === prev)) preferred = prev;
+  if (!preferred) {
+    const regLatest = state.logFiles.find((f) => String(f.name || "").endsWith("register-latest.log"));
+    const regAny = state.logFiles.find((f) => String(f.name || "").includes("register_"));
+    const gp = state.logFiles.find((f) => String(f.name || "").includes("goproxy.manager.log"));
+    preferred = (regLatest || regAny || gp || state.logFiles[0]).id;
+  }
+  sel.value = preferred;
   state.selectedLogId = sel.value;
   localStorage.setItem("grok_panel_log_id", state.selectedLogId || "");
   return res;
@@ -692,7 +701,10 @@ async function main() {
   document.querySelectorAll(".nav-btn").forEach((btn) => { btn.onclick = () => switchTab(btn.dataset.tab, { animate: true }); });
   if ($("btnLogRefresh")) $("btnLogRefresh").onclick = async () => withBusy($("btnLogRefresh"), async () => {
     try { await refreshLogView(); toast("日志已刷新", true, { title: "日志" }); }
-    catch (e) { toast(e.message, false); }
+    catch (e) {
+      if ($("logView")) $("logView").textContent = e.message || String(e);
+      toast(e.message, false);
+    }
   }, "刷新中...");
   if ($("btnLogReloadList")) $("btnLogReloadList").onclick = async () => withBusy($("btnLogReloadList"), async () => {
     try { await loadLogList(); await refreshLogView(); toast("日志列表已更新", true, { title: "日志" }); }

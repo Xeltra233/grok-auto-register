@@ -278,6 +278,9 @@ _TASK_PROGRESS = {
     "message": "",
 }
 _task_progress_lock = threading.Lock()
+_register_log_lock = threading.Lock()
+_register_log_fp = None
+_register_log_path = None
 _cpa_threads_lock = threading.Lock()
 _browser_lifecycle_lock = threading.RLock()
 
@@ -5398,11 +5401,57 @@ class CliStopController:
             raise SystemExit(1)
 
 
+def _ensure_register_log_file():
+    """Persist panel/CLI registration logs under logs/ so the panel Logs tab can read them."""
+    global _register_log_fp, _register_log_path
+    with _register_log_lock:
+        if _register_log_fp is not None and _register_log_path:
+            return _register_log_path
+        try:
+            root = os.path.dirname(os.path.abspath(__file__))
+            log_dir = os.path.join(root, "logs")
+            os.makedirs(log_dir, exist_ok=True)
+            path = os.path.join(
+                log_dir,
+                f"register_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.log",
+            )
+            # also keep a stable latest pointer
+            latest = os.path.join(log_dir, "register-latest.log")
+            fp = open(path, "a", encoding="utf-8", errors="replace")
+            _register_log_fp = fp
+            _register_log_path = path
+            try:
+                # rewrite latest as copy target via open append same path symlink-like
+                with open(latest, "a", encoding="utf-8", errors="replace") as lf:
+                    lf.write(f"\n==== session {datetime.datetime.now().isoformat(timespec='seconds')} file={path} ====\n")
+            except Exception:
+                pass
+            return path
+        except Exception:
+            return None
+
+
 def cli_log(message):
     if not should_emit_log(message):
         return
     timestamp = datetime.datetime.now().strftime("%H:%M:%S")
-    print(f"[{timestamp}] {message}", flush=True)
+    line = f"[{timestamp}] {message}"
+    print(line, flush=True)
+    try:
+        path = _ensure_register_log_file()
+        with _register_log_lock:
+            if _register_log_fp is not None:
+                _register_log_fp.write(line + "\n")
+                _register_log_fp.flush()
+            # mirror into stable latest file
+            if path:
+                latest = os.path.join(os.path.dirname(path), "register-latest.log")
+                with open(latest, "a", encoding="utf-8", errors="replace") as lf:
+                    lf.write(line + "\n")
+    except Exception:
+        pass
+
+
 
 
 def _install_cli_sigint_handler(controller):

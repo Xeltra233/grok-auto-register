@@ -1118,6 +1118,33 @@ class PanelHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(data)
             return
+        if path == "/api/logs":
+            # list available log files
+            return _json_response(self, 200, _list_log_files(cfg, root=STATE.root))
+        if path == "/api/logs/tail":
+            file_id = ""
+            try:
+                file_id = str((query.get("id") or [""])[0] or "")
+            except Exception:
+                file_id = ""
+            if not file_id:
+                # also accept name alone under app logs for convenience
+                try:
+                    name = str((query.get("name") or [""])[0] or "")
+                except Exception:
+                    name = ""
+                if name:
+                    file_id = f"app:{_safe_rel_name(name)}"
+            try:
+                lines = int((query.get("lines") or ["200"])[0] or 200)
+            except Exception:
+                lines = 200
+            target = _resolve_log_file(file_id, cfg, root=STATE.root)
+            if target is None:
+                return _json_response(self, 404, {"ok": False, "error": "log file not found", "id": file_id})
+            res = _tail_file(target, lines=lines)
+            res["id"] = file_id
+            return _json_response(self, 200 if res.get("ok") else 500, res)
         _json_response(self, 404, {"ok": False, "error": f"unknown api {path}"})
 
     def _api_post(self, path: str, body: dict):
@@ -1170,33 +1197,6 @@ class PanelHandler(BaseHTTPRequestHandler):
             _save_config(cfg)
             STATE.reload()
             return _json_response(self, 200, {**res, "selection": describe_proxy_selection(STATE.config)})
-        if path == "/api/logs":
-            # list available log files
-            return _json_response(self, 200, _list_log_files(cfg, root=STATE.root))
-        if path == "/api/logs/tail":
-            file_id = ""
-            try:
-                file_id = str((query.get("id") or [""])[0] or "")
-            except Exception:
-                file_id = ""
-            if not file_id:
-                # also accept name alone under app logs for convenience
-                try:
-                    name = str((query.get("name") or [""])[0] or "")
-                except Exception:
-                    name = ""
-                if name:
-                    file_id = f"app:{_safe_rel_name(name)}"
-            try:
-                lines = int((query.get("lines") or ["200"])[0] or 200)
-            except Exception:
-                lines = 200
-            target = _resolve_log_file(file_id, cfg, root=STATE.root)
-            if target is None:
-                return _json_response(self, 404, {"ok": False, "error": "log file not found", "id": file_id})
-            res = _tail_file(target, lines=lines)
-            res["id"] = file_id
-            return _json_response(self, 200 if res.get("ok") else 500, res)
         if path == "/api/logs/cleanup":
             res = cleanup_logs(
                 log_dir=str(cfg.get("log_dir") or "logs"),
