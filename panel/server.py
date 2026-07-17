@@ -23,7 +23,7 @@ from panel.credentials import (
     list_credentials,
 )
 from panel.goproxy_manager import get_manager
-from panel.log_cleanup import cleanup_logs
+from panel.log_cleanup import cleanup_logs, loop_status as log_cleanup_status, start_log_cleanup_loop, stop_log_cleanup_loop
 from panel.settings import (
     GOPROXY_ENDPOINTS,
     GOPROXY_POOL_MODES,
@@ -186,6 +186,7 @@ class PanelHandler(BaseHTTPRequestHandler):
                 "total": creds.get("total"),
             },
             "log_cleanup": STATE.last_log_cleanup,
+            "log_cleanup_loop": log_cleanup_status(),
             "browser_cleanup": STATE.last_browser_cleanup,
             "config": {
                 "panel_host": cfg.get("panel_host"),
@@ -396,10 +397,17 @@ class PanelHandler(BaseHTTPRequestHandler):
 
 
 class PanelServer:
-    def __init__(self, host: str = "127.0.0.1", port: int = 8787, start_browser_monitor: bool = True):
+    def __init__(
+        self,
+        host: str = "127.0.0.1",
+        port: int = 8787,
+        start_browser_monitor: bool = True,
+        start_log_cleanup: bool = True,
+    ):
         self.host = host
         self.port = int(port)
         self.start_browser_monitor = bool(start_browser_monitor)
+        self.start_log_cleanup = bool(start_log_cleanup)
         self._httpd: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
 
@@ -424,6 +432,31 @@ class PanelServer:
             config_provider=_cfg_provider,
         )
 
+    def _maybe_start_log_cleanup(self):
+        if not self.start_log_cleanup:
+            return
+        cfg = STATE.config or {}
+        if not bool(cfg.get("log_cleanup_enabled", True)):
+            return
+
+        def _cfg_provider():
+            current = STATE.reload()
+            out = dict(current)
+            out["_project_root"] = str(STATE.root)
+            return out
+
+        def _on_result(res: dict):
+            STATE.last_log_cleanup = res
+
+        start_log_cleanup_loop(
+            project_root=str(STATE.root),
+            interval_sec=float(cfg.get("log_cleanup_interval_sec") or 3600),
+            enabled=True,
+            config_provider=_cfg_provider,
+            on_result=_on_result,
+            run_immediately=True,
+        )
+
     def start(self):
         if self._httpd is not None:
             return
@@ -435,12 +468,20 @@ class PanelServer:
             self._maybe_start_browser_monitor()
         except Exception:
             pass
+        try:
+            self._maybe_start_log_cleanup()
+        except Exception:
+            pass
 
     def stop(self):
         if self._httpd is None:
             return
         try:
             stop_monitor_loop()
+        except Exception:
+            pass
+        try:
+            stop_log_cleanup_loop()
         except Exception:
             pass
         self._httpd.shutdown()

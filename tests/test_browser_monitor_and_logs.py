@@ -19,7 +19,7 @@ from panel.browser_monitor import (
     summary,
     unregister_browser,
 )
-from panel.log_cleanup import cleanup_logs
+from panel.log_cleanup import cleanup_logs, loop_status as log_loop_status, start_log_cleanup_loop, stop_log_cleanup_loop
 
 
 class DummyBrowser:
@@ -163,3 +163,48 @@ class LogCleanupTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LogCleanupLoopTests(unittest.TestCase):
+    def setUp(self):
+        stop_log_cleanup_loop()
+
+    def tearDown(self):
+        stop_log_cleanup_loop()
+
+    def test_loop_runs_and_records_status(self):
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td) / "logs"
+            d.mkdir()
+            old = d / "old.log"
+            old.write_text("old" * 50, encoding="utf-8")
+            old_mtime = time.time() - 10 * 86400
+            os.utime(old, (old_mtime, old_mtime))
+
+            cfg = {
+                "log_cleanup_enabled": True,
+                "log_dir": "logs",
+                "log_retain_days": 7,
+                "log_max_total_mb": 1,
+                "log_cleanup_globs": "*.log",
+                "log_cleanup_interval_sec": 60,
+                "_project_root": td,
+            }
+            started = start_log_cleanup_loop(
+                project_root=td,
+                interval_sec=60,
+                enabled=True,
+                config_provider=lambda: cfg,
+                run_immediately=True,
+            )
+            self.assertTrue(started["running"])
+            deadline = time.time() + 2.0
+            while time.time() < deadline and not log_loop_status().get("last_ts"):
+                time.sleep(0.05)
+            st = log_loop_status()
+            self.assertTrue(st["running"])
+            self.assertIsNotNone(st["last_ts"])
+            self.assertTrue(st["last_ok"])
+            self.assertFalse(old.exists())
+            stop_log_cleanup_loop()
+            self.assertFalse(log_loop_status()["running"])
