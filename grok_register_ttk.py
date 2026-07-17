@@ -1102,7 +1102,7 @@ def persist_successful_account(email, password, sso, accounts_output_file, log_c
                 f.write(line)
     except Exception as file_exc:
         if log_callback:
-            log_callback(f"[Debug] ????????: {file_exc}")
+            log_callback(f"[Debug] 写入账号文件失败: {file_exc}")
     add_token_to_grok2api_pools(sso, email=email, log_callback=log_callback)
     add_token_to_token_only_file(sso, log_callback=log_callback)
     return {"email": email, "sso": sso, "profile": profile or {}}
@@ -1123,13 +1123,13 @@ def run_success_live_gate(email, password, sso, log_callback=None, page=None):
                 return {"ok": True, "skipped": True, "cpa_result": r, "live": (r or {}).get("live_inspect")}
             except Exception as exc:
                 if log_callback:
-                    log_callback(f"[!] CPA ?????????????: {exc}")
+                    log_callback(f"[!] CPA 导出异常（已跳过测活门槛）: {exc}")
                 return {"ok": True, "skipped": True, "cpa_result": None, "live": None, "error": str(exc)}
         return {"ok": True, "skipped": True, "cpa_result": None, "live": None}
 
     if cpa_enabled:
         if log_callback:
-            log_callback("[*] ????: CPA mint + ???????????/???")
+            log_callback("[*] 成功门槛: CPA mint + 测活通过后才本地保存/推送")
         result = export_cpa_xai_for_account(
             email,
             password or "",
@@ -1139,15 +1139,15 @@ def run_success_live_gate(email, password, sso, log_callback=None, page=None):
         )
         if result.get("ok"):
             if log_callback:
-                log_callback(f"[+] ?????????/??: {result.get('path', '')}")
+                log_callback(f"[+] 测活通过，已导出/保存: {result.get('path', '')}")
             return {"ok": True, "cpa_result": result, "live": result.get("live_inspect")}
         err = result.get("error") or "live/CPA gate failed"
         if log_callback:
-            log_callback(f"[!] ??/CPA ???????????????: {err}")
+            log_callback(f"[!] 测活/CPA 门槛失败，不保存不推送: {err}")
         return {"ok": False, "cpa_result": result, "live": result.get("live_inspect"), "error": err}
 
     if log_callback:
-        log_callback("[*] ????: SSO->access_token ?????? CPA ???")
+        log_callback("[*] 成功门槛: SSO->access_token 测活（未开启 CPA 导出）")
     try:
         from cpa_xai.auth_code import mint_tokens_from_sso
         from cpa_xai.inspect import inspect_access_token, is_live_pass
@@ -1173,7 +1173,7 @@ def run_success_live_gate(email, password, sso, log_callback=None, page=None):
         }
     except Exception as exc:
         if log_callback:
-            log_callback(f"[!] ???????????: {exc}")
+            log_callback(f"[!] 测活流程异常: {exc}")
         return {"ok": False, "cpa_result": None, "live": None, "error": str(exc)}
 
 
@@ -1193,7 +1193,7 @@ def export_cpa_xai_for_account(email, password, sso=None, log_callback=None, pag
         )
     except Exception as exc:
         if log_callback:
-            log_callback(f"[cpa] CPA xAI 导出失败: {exc}")
+            log_callback(f"[!] CPA 导出异常（已跳过测活门槛）: {exc}")
         return {"ok": False, "error": str(exc)}
 
 
@@ -3510,59 +3510,8 @@ return false;
         except Exception:
             return False
 
-    # 进入验证码页前，页面可能先卡 Cloudflare/人机验证；先给人工时间，不要秒失败。
-    captcha_wait_deadline = time.time() + 120
-    while time.time() < captcha_wait_deadline:
-        raise_if_cancelled(cancel_callback)
-        try:
-            page_state = _get_page().run_js(
-                r"""
-function isVisible(node) {
-  if (!node) return false;
-  const style = window.getComputedStyle(node);
-  if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
-  const rect = node.getBoundingClientRect();
-  return rect.width > 0 && rect.height > 0;
-}
-const codeInputs = Array.from(document.querySelectorAll(
-  'input[data-input-otp="true"], input[name="code"], input[name="otp"], input[autocomplete="one-time-code"], input[inputmode="numeric"], input[maxlength="1"]'
-)).filter((n) => isVisible(n) && !n.disabled);
-const hasCodeUI = codeInputs.length > 0;
-const cfInput = document.querySelector('input[name="cf-turnstile-response"]');
-const cfPresent = !!cfInput
-  || !!document.querySelector('iframe[src*="turnstile"], div.cf-turnstile, [data-sitekey], script[src*="turnstile"], iframe[src*="challenges.cloudflare"]');
-const cfSolved = !!(cfInput && String(cfInput.value || '').trim().length >= 80);
-const text = (document.body && (document.body.innerText || document.body.textContent) || '').toLowerCase();
-const mentionsCode = text.includes('verification') || text.includes('verify') || text.includes('验证码') || text.includes('code');
-return {
-  hasCodeUI,
-  cfPresent,
-  cfSolved,
-  mentionsCode,
-  url: location.href
-};
-"""
-            )
-        except Exception:
-            page_state = {}
-        if isinstance(page_state, dict) and page_state.get("hasCodeUI"):
-            if log_callback:
-                log_callback("[*] 已检测到验证码输入框，开始拉取邮箱验证码")
-            break
-        if isinstance(page_state, dict) and page_state.get("cfPresent") and not page_state.get("cfSolved"):
-            # try auto assist, but mainly wait for manual
-            try:
-                getTurnstileToken(log_callback=log_callback, cancel_callback=cancel_callback)
-            except Exception:
-                pass
-            if log_callback:
-                remain = int(max(captcha_wait_deadline - time.time(), 0))
-                log_callback(f"[*] 页面仍有人机验证，请在浏览器完成验证（剩余约 {remain}s）")
-            sleep_with_cancel(2, cancel_callback)
-            continue
-        # no clear code UI yet, keep waiting a bit
-        sleep_with_cancel(1, cancel_callback)
-
+    # email OTP stage: fetch mail code and fill directly; do not wait Cloudflare/Turnstile here.
+    # CF/Turnstile should only be handled on signup/profile pages when needed.
     code = get_oai_code(
         dev_token,
         email,
@@ -5067,12 +5016,12 @@ class GrokRegisterGUI:
         )
         _cpa_page = _get_page()
         if config.get("enable_nsfw", True):
-            log_fn("[*] 6. ?? NSFW")
+            log_fn("[*] 6. 开启 NSFW")
             nsfw_ok, nsfw_msg = enable_nsfw_for_token(sso, log_callback=log_fn)
             if nsfw_ok:
-                log_fn(f"[+] NSFW ????: {nsfw_msg}")
+                log_fn(f"[+] NSFW 开启成功: {nsfw_msg}")
             else:
-                log_fn(f"[!] NSFW ??????????: {nsfw_msg}")
+                log_fn(f"[!] NSFW 开启失败（可继续）: {nsfw_msg}")
         gate = run_success_live_gate(
             email,
             profile.get("password", ""),
@@ -5093,7 +5042,7 @@ class GrokRegisterGUI:
         with _stats_lock:
             self.results.append({"email": email, "sso": sso, "profile": profile, "live": gate.get("live")})
             self.success_count += 1
-        log_fn(f"[+] ????: {email}")
+        log_fn(f"[+] 注册成功: {email}")
 
     def _run_single_worker(self, count, worker_id=0):
         _set_worker_id(worker_id)
@@ -5268,12 +5217,12 @@ def _register_one_account_cli(log_fn, stop_fn, accounts_output_file):
     )
     _cpa_page = _get_page()
     if config.get("enable_nsfw", True):
-        log_fn("[*] 6. ?? NSFW")
+        log_fn("[*] 6. 开启 NSFW")
         nsfw_ok, nsfw_msg = enable_nsfw_for_token(sso, log_callback=log_fn)
         if nsfw_ok:
-            log_fn(f"[+] NSFW ????: {nsfw_msg}")
+            log_fn(f"[+] NSFW 开启成功: {nsfw_msg}")
         else:
-            log_fn(f"[!] NSFW ??????????: {nsfw_msg}")
+            log_fn(f"[!] NSFW 开启失败（可继续）: {nsfw_msg}")
     gate = run_success_live_gate(
         email,
         profile.get("password", ""),
@@ -5291,7 +5240,7 @@ def _register_one_account_cli(log_fn, stop_fn, accounts_output_file):
         log_callback=log_fn,
         profile=profile,
     )
-    log_fn(f"[+] ????: {email}")
+    log_fn(f"[+] 注册成功: {email}")
 
 
 def _cli_worker_loop(worker_id, task_queue, total_count, controller, accounts_output_file, stats):
