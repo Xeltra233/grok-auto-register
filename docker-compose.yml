@@ -1,0 +1,18 @@
+services:
+  panel:
+    build: .
+    image: grok-auto-register:panel
+    container_name: grok-auto-register
+    ports:
+      - "8787:8787"
+    environment:
+      PANEL_HOST: "0.0.0.0"
+      PORT: "8787"
+      PANEL_PORT: "8787"
+      GOPROXY_ENABLED: "0"
+    volumes:
+      - ./config.json:/app/config.json
+      - ./cpa_auths:/app/cpa_auths
+      - ./logs:/app/logs
+      - ./data:/app/data
+    restart: unless-stopped

@@ -85,6 +85,43 @@ $env:GROK_PANEL_PASSWORD="your-password"
 python run_branch.py panel
 ```
 
+## Docker 部署
+
+本分支支持 Docker 运行 Web 面板（容器内不跑 GUI）。
+
+### 构建与启动
+
+```bash
+# 准备配置
+cp config.example.json config.json
+# 按需编辑 config.json（邮箱 API、代理、密码等）
+
+docker compose up -d --build
+```
+
+面板地址：`http://服务器IP:8787/`
+
+### 仅构建镜像
+
+```bash
+docker build -t grok-auto-register:panel .
+docker run -d --name grok-auto-register   -p 8787:8787   -e PANEL_HOST=0.0.0.0   -e PORT=8787   -e GOPROXY_ENABLED=0   -v "$PWD/config.json:/app/config.json"   -v "$PWD/cpa_auths:/app/cpa_auths"   -v "$PWD/logs:/app/logs"   -v "$PWD/data:/app/data"   grok-auto-register:panel
+```
+
+### 容器内注册
+
+```bash
+docker exec -it grok-auto-register python run_branch.py cli --start --count 1
+```
+
+### 说明
+
+- 入口文件：`main.py`（启动 Web 面板）
+- 默认监听：`0.0.0.0:8787`
+- 容器默认关闭内置 GoProxy（`GOPROXY_ENABLED=0`），避免云环境缺 Go 构建链
+- 建议挂载卷：`config.json`、`cpa_auths/`、`logs/`、`data/`
+- 面板密码可用环境变量：`GROK_PANEL_PASSWORD`
+
 ## 特性分支能力
 
 | 能力 | 说明 |
